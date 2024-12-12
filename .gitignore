@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# Environments
+.env
+.venv
+env/
+venv/
+.python-version
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# W&B
+wandb/
+
+# Models
+models/*

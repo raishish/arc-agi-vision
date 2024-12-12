@@ -1,0 +1,8 @@
+ipykernel==6.29.5
+matplotlib==3.9.2
+pandas==2.2.3
+pip==21.2.3
+tensorflow==2.18.0
+torch==2.5.1
+tqdm==4.67.1
+wandb==0.19.0
