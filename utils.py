@@ -5,6 +5,7 @@ from tqdm import tqdm
 import wandb
 import matplotlib.pyplot as plt
 from typing import List
+import os
 
 
 class ARCDataset(Dataset):
@@ -68,6 +69,28 @@ class UnpadTransform:
         return unpadded_grid
 
 
+def get_class_weights(dataloader: torch.utils.data.DataLoader) -> torch.Tensor:
+    """
+    Get class weights for a given dataloader.
+
+    Args:
+        dataloader (torch.utils.data.DataLoader): dataloader
+
+    Returns:
+        torch.Tensor: class weights
+    """
+    targets = []
+    for _, batch_targets in dataloader:
+        targets.append(batch_targets)
+
+    targets = torch.cat(targets, dim=0)
+    unique_values, counts = torch.unique(targets, return_counts=True)
+    freqs = counts / counts.sum()
+    class_weights = 1.0 / freqs
+
+    return class_weights
+
+
 def get_dataloaders(
     dataframe,
     val_split=0.2,
@@ -90,9 +113,8 @@ def get_dataloaders(
     """
     dataset = ARCDataset(dataframe, transform=transform)
 
-    if int(val_split) == 0:  # No validation set / Test set
-        dataloader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=shuffle)
+    if val_split is None or val_split == 0.:  # No validation set / Test set
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
         return dataloader, None
 
     dataset_size = len(dataset)
@@ -125,7 +147,8 @@ def train_model(
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     dataset_variation="ARC-AGI",
     architecture="pixelcnn",
-    wandb_project="pixelcnn"
+    wandb_project="arc-agi-vision",
+    save_folder="models"
 ):
     """
     Trains a model on the given dataloaders.
@@ -280,11 +303,86 @@ def train_model(
             scheduler.step(avg_val_loss)
 
     # Save the model
-    torch.save(model.state_dict(), f"{architecture}_{epochs}epochs_lr{learning_rate}.pth")
-    wandb.save(f"{architecture}_{epochs}epochs_lr{learning_rate}.pth")
+    model_name = f"{architecture}_{epochs}epochs_lr{learning_rate}.pt"
+    model_path = os.path.join(save_folder, model_name)
+    torch.save(model.state_dict(), model_path)
+    wandb.save(model_name)
 
     # Finish the wandb run
     wandb.finish()
+
+
+def eval_model(
+    model: torch.nn.Module,
+    dataloader: torch.utils.data.DataLoader,
+    criterion: torch.nn.Module = torch.nn.CrossEntropyLoss(),
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+) -> dict:
+    """
+    Evaluates a model on a given dataloader.
+
+    Args:
+        model (torch.nn.Module): model to evaluate
+        dataloader (torch.utils.data.DataLoader): dataloader
+        device (torch.device): device to use for evaluation
+
+    Returns:
+        dict: evaluation metrics
+    """
+    model.eval()
+    total_loss = 0.0
+    total_pixels = 0
+    correct_pixels = 0
+    total_grids = 0
+    correct_grids = 0
+    total_background_pixels = 0
+    correct_background_pixels = 0
+    total_foreground_pixels = 0
+    correct_foreground_pixels = 0
+
+    with torch.no_grad():
+        with tqdm(total=len(dataloader), desc="Evaluation", unit="batch") as pbar:
+            for inputs, targets in dataloader:
+                inputs, targets = inputs.to(device), targets.to(device)
+                targets = targets.squeeze(1)  # Remove the channel dimension from targets
+                outputs = model(inputs)
+                loss = criterion(outputs, targets.squeeze(1).long())
+                total_loss += loss.item()
+
+                metrics = get_accuracy_metrics(outputs, targets)
+                total_pixels += metrics['total_pixels']
+                correct_pixels += metrics['correct_pixels']
+                total_grids += metrics['total_grids']
+                correct_grids += metrics['correct_grids']
+                total_background_pixels += metrics['total_background_pixels']
+                correct_background_pixels += metrics['correct_background_pixels']
+                total_foreground_pixels += metrics['total_foreground_pixels']
+                correct_foreground_pixels += metrics['correct_foreground_pixels']
+
+                # Update progress bar
+                pbar.set_postfix({
+                    'CE Loss': loss.item(),
+                    'Pixel Accuracy': f"{100. * metrics['pixel_accuracy']:.2f} %",
+                    'Grid accuracy': f"{100. * metrics['grid_accuracy']:.2f} %",
+                    'Background accuracy': f"{100. * metrics['background_accuracy']:.2f} %",
+                    'Foreground accuracy': f"{100. * metrics['foreground_accuracy']:.2f} %"
+                })
+                pbar.update(1)
+
+    # Per epoch metrics
+    avg_loss = total_loss / len(dataloader)
+    pixel_accuracy = 100. * correct_pixels / total_pixels
+    grid_accuracy = 100. * correct_grids / total_grids
+    background_accuracy = 100. * correct_background_pixels / total_background_pixels
+    foreground_accuracy = 100. * correct_foreground_pixels / total_foreground_pixels
+
+    return {
+        "Average Loss": avg_loss,
+        "pixel_accuracy": pixel_accuracy,
+        "grid_accuracy": grid_accuracy,
+        "background_accuracy": background_accuracy,
+        "foreground_accuracy": foreground_accuracy
+    }
 
 
 def plot_batch(models: List[torch.nn.Module], inputs: torch.Tensor, targets: torch.Tensor):
