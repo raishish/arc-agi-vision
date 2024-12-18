@@ -193,6 +193,8 @@ def train_model(
         model.train()
         train_metrics = {
             "loss": 0.0,
+            "reconstruction_loss": 0.0,
+            "kl_loss": 0.0,
             "accuracy": 0.0,
             "total_pixels": 0,
             "correct_pixels": 0,
@@ -232,6 +234,8 @@ def train_model(
         model.eval()
         val_metrics = {
             "loss": 0.0,
+            "reconstruction_loss": 0.0,
+            "kl_loss": 0.0,
             "accuracy": 0.0,
             "total_pixels": 0,
             "correct_pixels": 0,
@@ -325,6 +329,8 @@ def eval_model(
     """
     eval_metrics = {
         "loss": 0.0,
+        "reconstruction_loss": 0.0,
+        "kl_loss": 0.0,
         "accuracy": 0.0,
         "total_pixels": 0,
         "correct_pixels": 0,
@@ -510,6 +516,10 @@ def get_accuracy_metrics(outputs: torch.Tensor, targets: torch.Tensor, backgroun
 def aggregate_metrics(metrics: dict, batch_metrics: dict):
     """Aggregates batch metrics into the metrics dictionary"""
     metrics["loss"] += batch_metrics["loss"]
+    if 'reconstruction_loss' in batch_metrics:
+        metrics["reconstruction_loss"] += batch_metrics["reconstruction_loss"]
+    if 'kl_loss' in batch_metrics:
+        metrics["kl_loss"] += batch_metrics["kl_loss"]
     metrics["total_pixels"] += batch_metrics["total_pixels"]
     metrics["correct_pixels"] += batch_metrics["correct_pixels"]
     metrics["total_grids"] += batch_metrics["total_grids"]

@@ -66,7 +66,7 @@ class VAE(nn.Module):
         num_classes=10,
         hidden_dim=32
     ):
-        super().__init__()
+        super(VAE, self).__init__()
         self.encoder = Encoder(
             input_dim=input_dim,
             latent_dim=latent_dim,
