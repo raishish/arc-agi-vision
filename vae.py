@@ -103,18 +103,15 @@ class VAE(nn.Module):
         Processes one batch of data.
 
         Args:
-            data (torch.Tensor): tuple of (input, target) tensors
-            batch_num (int): batch number
-            model (torch.nn.Module): model to use
-            device (torch.device): device to use
+            data: tuple of (input, target) tensors
+            optimizer: optimizer
+            loss_criterion: loss criterion
+            acc_criterion (optional): accuracy criterion
+            device (torch.device): device
             mode (str): mode to use (train, eval, or test)
-            optimizer (torch.optim.Optimizer): optimizer to use
-            loss_criterion (torch.nn.Module): loss criterion to use
-            acc_criterion (torch.nn.Module, optional): accuracy criterion to use
-            verbose (int, optional): verbosity level (0, 1, or 2)
 
         Returns:
-            dict: metrics for the batch (loss, accuracy)
+            tuple: (outputs, metrics)
         """
         # Move data to the device
         inputs, targets = data[0].to(device), data[1].to(device).squeeze()
