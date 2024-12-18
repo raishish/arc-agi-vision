@@ -384,7 +384,11 @@ def eval_model(
             pbar.update(1)
 
     # Print metrics
-    print("Evaluation Metrics:", eval_metrics)
+    filtered_metrics = [key for key in eval_metrics.keys() if "loss" in key or "accuracy" in key]
+    print("Evaluation Metrics:")
+    print("-" * 50)
+    for metric in filtered_metrics:
+        print(f"{metric}: {eval_metrics[metric]:.2f}")
 
     # Save results
     os.makedirs(results_dir, exist_ok=True)
