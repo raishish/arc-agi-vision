@@ -1,7 +1,3 @@
-#! /usr/bin/env python3
-
-from time import time
-from datetime import timedelta
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -436,59 +432,52 @@ class Segmenter(nn.Module):
 
         return self.decoder.get_attention_map(x, layer_id)
 
+    def process_one_batch(
+        self,
+        data: tuple,
+        optimizer: torch.optim.Optimizer,
+        loss_criterion: torch.nn.Module,
+        acc_criterion=None,
+        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        mode: str = "eval",
+    ):
+        """
+        Process one batch of training or validation data
 
-def _process_one_batch(
-    data, batch_num, model, device, mode: str,
-    optimizer, loss_criterion, acc_criterion=None,
-    verbose: int = 0
-):
-    """
-    Process one batch of training or validation data
+        Args:
+            data (torch.Tensor): tuple of (input, target) tensors
+            optimizer (torch.optim.Optimizer): optimizer to use
+            loss_criterion (torch.nn.Module): loss criterion to use
+            acc_criterion (torch.nn.Module, optional): accuracy criterion to use
+            device (torch.device): device to use
+            mode (str): mode to use (train, eval, or test)
 
-    Args:
-        data (torch.Tensor): One batch size worth data
-                             shape = [batch_size, 22, 160, 240, 3]
-        batch_num (int): batch iteration
-        model (torch.nn.Module): model to train / evaluate
-        device (torch.device): torch device
-        mode (str): one of ["train", "eval"]
-        optimizer (torch.optim): Optimizer
-        loss_criterion (nn.modules.loss): Loss criterion
-        acc_criterion (): Accuracy criterion
-        verbose (int): verbosity of logs
-    Returns:
-        loss, accuracy (optional)
-    """
-    t1 = time()
-    inputs, targets = data
-    targets = targets.squeeze(1)  # Remove the channel dimension from targets
-    inputs.to(device)
-    targets.to(device)
+        Returns:
+            tuple: (outputs, metrics)
+        """
+        # Move data to the device
+        inputs, targets = data[0].to(device), data[1].to(device).squeeze()
 
-    outputs = model(inputs.float())
+        # Forward pass
+        outputs = self.forward(inputs)
 
-    print(f"outputs shape: {outputs.shape}, ({outputs.dtype})")
-    print(f"Targets shape: {targets.shape}, ({targets.dtype})")
+        # Calculate loss
+        loss = loss_criterion(outputs, targets.long())
 
-    batch_loss = loss_criterion(outputs, targets.long())
+        # Backpropagate
+        if mode == "train":
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-    if mode == "train":
-        optimizer.zero_grad()
-        batch_loss.backward()
-        optimizer.step()
+        # Calculate accuracy
+        if acc_criterion:
+            batch_acc = acc_criterion(outputs, targets)
+        else:
+            batch_acc = None
 
-    # Calculate training accuracy
-    if acc_criterion:
-        batch_acc = acc_criterion(outputs, targets)
-    else:
-        batch_acc = 0
+        metrics = get_accuracy_metrics(outputs, targets)
+        metrics["loss"] = loss.item()
+        metrics["accuracy"] = batch_acc.item()
 
-    metrics = get_accuracy_metrics(outputs, targets)
-    print(f"Metrics: {metrics}")
-
-    elapsed = str(timedelta(seconds=time() - t1))
-    if verbose > 1:
-        print(f"Processed {mode} batch {batch_num} in {elapsed}")
-        print("-" * 60)
-
-    return batch_loss, batch_acc
+        return outputs, metrics
