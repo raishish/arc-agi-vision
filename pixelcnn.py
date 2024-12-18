@@ -190,6 +190,6 @@ class PixelCNNPlusPlus(nn.Module):
 
         metrics = get_accuracy_metrics(outputs, targets)
         metrics["loss"] = loss.item()
-        metrics["accuracy"] = batch_acc
+        metrics["accuracy"] = batch_acc.item()
 
         return outputs, metrics

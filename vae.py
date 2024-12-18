@@ -143,7 +143,7 @@ class VAE(nn.Module):
         metrics["loss"] = loss.item()
         metrics["reconstruction_loss"] = recon_loss.item()
         metrics["kl_loss"] = kl_loss.item()
-        metrics["accuracy"] = batch_acc
+        metrics["accuracy"] = batch_acc.item()
 
         return outputs, metrics
 
