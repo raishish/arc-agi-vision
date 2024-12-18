@@ -1,6 +1,7 @@
-# import torch
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from utils import get_accuracy_metrics
 
 
 class PixelCNN(nn.Module):
@@ -139,3 +140,56 @@ class PixelCNNPlusPlus(nn.Module):
 
     def forward(self, x):
         return self.layers(x)
+
+    def process_one_batch(
+        self,
+        data: tuple,
+        optimizer: torch.optim.Optimizer,
+        loss_criterion: torch.nn.Module,
+        acc_criterion=None,
+        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+        mode: str = "eval",
+    ):
+        """
+        Processes one batch of data.
+
+        Args:
+            data (torch.Tensor): tuple of (input, target) tensors
+            batch_num (int): batch number
+            model (torch.nn.Module): model to use
+            device (torch.device): device to use
+            mode (str): mode to use (train, eval, or test)
+            optimizer (torch.optim.Optimizer): optimizer to use
+            loss_criterion (torch.nn.Module): loss criterion to use
+            acc_criterion (torch.nn.Module, optional): accuracy criterion to use
+            verbose (int, optional): verbosity level (0, 1, or 2)
+
+        Returns:
+            dict: metrics for the batch (loss, accuracy)
+        """
+        # Move data to the device
+        inputs, targets = data[0].to(device), data[1].to(device).squeeze()
+
+        # Forward pass
+        outputs = self.forward(inputs)
+
+        # Calculate loss
+        loss = loss_criterion(outputs, targets.long())
+
+        # Backpropagate
+        if mode == "train":
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+        # Calculate accuracy
+        if acc_criterion:
+            batch_acc = acc_criterion(outputs, targets)
+        else:
+            batch_acc = None
+
+        metrics = get_accuracy_metrics(outputs, targets)
+        metrics["loss"] = loss.item()
+        metrics["accuracy"] = batch_acc
+
+        return outputs, metrics
