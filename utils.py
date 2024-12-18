@@ -6,6 +6,7 @@ import wandb
 import matplotlib.pyplot as plt
 from typing import List
 import os
+import pandas as pd
 
 
 class ARCDataset(Dataset):
@@ -28,12 +29,17 @@ class ARCDataset(Dataset):
             eval(self.dataframe.iloc[idx]['input']), dtype=torch.float32)
         output_grid = torch.tensor(
             eval(self.dataframe.iloc[idx]['output']), dtype=torch.float32)
+        metadata = {
+            'sample_id': self.dataframe.iloc[idx]['sample_id'],
+            'input_dims': (input_grid.shape[0], input_grid.shape[1]),
+            'output_dims': (output_grid.shape[0], output_grid.shape[1])
+        }
 
         if self.transform:
             input_grid = self.transform(input_grid)
             output_grid = self.transform(output_grid)
 
-        return input_grid.unsqueeze(0), output_grid.unsqueeze(0)
+        return metadata, input_grid.unsqueeze(0), output_grid.unsqueeze(0)
 
 
 class PadTransform:
@@ -80,7 +86,7 @@ def get_class_weights(dataloader: torch.utils.data.DataLoader) -> torch.Tensor:
         torch.Tensor: class weights
     """
     targets = []
-    for _, batch_targets in dataloader:
+    for _, _, batch_targets in dataloader:
         targets.append(batch_targets)
 
     targets = torch.cat(targets, dim=0)
@@ -115,6 +121,7 @@ def get_dataloaders(
 
     if val_split is None or val_split == 0.:  # No validation set / Test set
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+        print("Dataset size: ", len(dataset))
         return dataloader, None
 
     dataset_size = len(dataset)
@@ -137,18 +144,20 @@ def get_dataloaders(
 
 
 def train_model(
-    model,
-    train_dataloader,
-    val_dataloader,
-    epochs,
-    criterion,
-    optimizer,
-    scheduler=None,
-    device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    dataset_variation="ARC-AGI",
-    architecture="pixelcnn",
-    wandb_project="arc-agi-vision",
-    save_folder="models"
+    model: torch.nn.Module,
+    train_dataloader: torch.utils.data.DataLoader,
+    val_dataloader: torch.utils.data.DataLoader,
+    epochs: int,
+    loss_criterion: torch.nn.Module,
+    acc_criterion: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler = None,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    save_folder: str = "models",
+    wandb_tracking: bool = True,
+    test: bool = True,
+    test_dataloader: torch.utils.data.DataLoader = None,
+    **params
 ):
     """
     Trains a model on the given dataloaders.
@@ -158,23 +167,23 @@ def train_model(
         train_dataloader (torch.utils.data.DataLoader): dataloader for training
         val_dataloader (torch.utils.data.DataLoader): dataloader for validation/testing
         epochs (int): number of epochs to train the model
-        criterion (torch.nn.Module): loss function
+        loss_criterion (torch.nn.Module): loss function
         optimizer (torch.optim.Optimizer): optimizer
         scheduler (torch.optim.lr_scheduler, optional): learning rate scheduler
         device (torch.device, optional): device to use for training
-        dataset_variation (str, optional): variation of the dataset (for logging)
-        architecture (str, optional): architecture of the model (for logging)
-        wandb_project (str, optional): wandb project name (for wandb support)
+        save_folder (str, optional): folder to save the model
+        wandb_tracking (bool, optional): whether to track metrics with wandb
+        test (bool, optional): whether to test the model
+        params (dict, optional): additional parameters
     """
-    # Initialize wandb
-    wandb.init(project=wandb_project, entity="raishish")
-    wandb.config.update({
-        "architecture": architecture,
-        "dataset": dataset_variation,
-        "epochs": epochs,
-        "batch_size": train_dataloader.batch_size,
-        "learning_rate": optimizer.param_groups[0]['lr']
-    })
+
+    if wandb_tracking:
+        # Initialize wandb
+        wandb.init(
+            entity=params.get("wandb_entity", "arc-agi-vision"),
+            project=params.get("wandb_project", "arc-agi-vision"),
+            config=params
+        )
 
     learning_rate = optimizer.param_groups[0]['lr']  # Save the learning rate
     model.to(device)
@@ -182,144 +191,129 @@ def train_model(
     for epoch in range(epochs):
         # Training phase
         model.train()
-        train_loss = 0.0
-        correct_train_pixels = 0
-        total_train_pixels = 0
-        total_train_grids = 0
-        correct_train_grids = 0
-        total_train_background_pixels = 0
-        correct_train_background_pixels = 0
-        total_train_foreground_pixels = 0
-        correct_train_foreground_pixels = 0
+        train_metrics = {
+            "loss": 0.0,
+            "accuracy": 0.0,
+            "total_pixels": 0,
+            "correct_pixels": 0,
+            "total_grids": 0,
+            "correct_grids": 0,
+            "total_background_pixels": 0,
+            "correct_background_pixels": 0,
+            "total_foreground_pixels": 0,
+            "correct_foreground_pixels": 0,
+            "num_batches": 0
+        }
 
         with tqdm(total=len(train_dataloader), desc=f"Train Epoch {epoch + 1}/{epochs}", unit="batch") as pbar:
-            for inputs, targets in train_dataloader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                targets = targets.squeeze(1)  # Remove the channel dimension from targets
-                # forward pass
-                outputs = model(inputs)
-                # compute loss
-                loss = criterion(outputs, targets.long())  # Convert targets to Long
-                train_loss += loss.item()
-                # backward pass
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            for _, inputs, targets in train_dataloader:
+                _, batch_metrics = model.process_one_batch(
+                    (inputs, targets),
+                    optimizer,
+                    loss_criterion,
+                    acc_criterion=acc_criterion,
+                    device=device,
+                    mode="train"
+                )
 
-                # Calculate accuracy metrics
-                metrics = get_accuracy_metrics(outputs, targets)
-                total_train_pixels += metrics['total_pixels']
-                correct_train_pixels += metrics['correct_pixels']
-                total_train_grids += metrics['total_grids']
-                correct_train_grids += metrics['correct_grids']
-                total_train_background_pixels += metrics['total_background_pixels']
-                correct_train_background_pixels += metrics['correct_background_pixels']
-                total_train_foreground_pixels += metrics['total_foreground_pixels']
-                correct_train_foreground_pixels += metrics['correct_foreground_pixels']
+                aggregate_metrics(train_metrics, batch_metrics)
 
                 # Update progress bar
                 pbar.set_postfix({
-                    'CE Loss': train_loss / (pbar.n + 1),
-                    'Pixel accuracy': f"{100. * metrics['pixel_accuracy']:.2f} %",
-                    'Grid accuracy': f"{100. * metrics['grid_accuracy']:.2f} %",
-                    'Background accuracy': f"{100. * metrics['background_accuracy']:.2f} %",
-                    'Foreground accuracy': f"{100. * metrics['foreground_accuracy']:.2f} %"
+                    'CE Loss': batch_metrics["loss"] / (pbar.n + 1),
+                    'Pixel accuracy': f"{100. * batch_metrics['pixel_accuracy']:.2f} %",
+                    'Grid accuracy': f"{100. * batch_metrics['grid_accuracy']:.2f} %",
+                    'Background accuracy': f"{100. * batch_metrics['background_accuracy']:.2f} %",
+                    'Foreground accuracy': f"{100. * batch_metrics['foreground_accuracy']:.2f} %"
                 })
                 pbar.update(1)
 
-        # Per epoch metrics
-        avg_train_loss = train_loss / len(train_dataloader)
-        train_pixel_accuracy = 100. * correct_train_pixels / total_train_pixels
-        train_grid_accuracy = 100. * correct_train_grids / total_train_grids
-        train_background_accuracy = 100. * correct_train_background_pixels / total_train_background_pixels
-        train_foreground_accuracy = 100. * correct_train_foreground_pixels / total_train_foreground_pixels
-
         # Validation phase
         model.eval()
-        val_loss = 0.0
-        total_val_pixels = 0
-        correct_val_pixels = 0
-        total_val_grids = 0
-        correct_val_grids = 0
-        total_val_background_pixels = 0
-        correct_val_background_pixels = 0
-        total_val_foreground_pixels = 0
-        correct_val_foreground_pixels = 0
+        val_metrics = {
+            "loss": 0.0,
+            "accuracy": 0.0,
+            "total_pixels": 0,
+            "correct_pixels": 0,
+            "total_grids": 0,
+            "correct_grids": 0,
+            "total_background_pixels": 0,
+            "correct_background_pixels": 0,
+            "total_foreground_pixels": 0,
+            "correct_foreground_pixels": 0,
+            "num_batches": 0
+        }
 
-        with torch.no_grad():
-            with tqdm(total=len(val_dataloader), desc=f"Validation Epoch {epoch + 1}/{epochs}", unit="batch") as pbar:
-                for inputs, targets in val_dataloader:
-                    inputs, targets = inputs.to(device), targets.to(device)
-                    targets = targets.squeeze(1)  # Remove the channel dimension from targets
-                    outputs = model(inputs)
-                    loss = criterion(outputs, targets.squeeze(1).long())
-                    val_loss += loss.item()
+        with tqdm(total=len(val_dataloader), desc=f"Validation Epoch {epoch + 1}/{epochs}", unit="batch") as pbar:
+            for _, inputs, targets in val_dataloader:
+                _, batch_metrics = model.process_one_batch(
+                    (inputs, targets),
+                    optimizer,
+                    loss_criterion,
+                    acc_criterion=acc_criterion,
+                    device=device,
+                    mode="eval"
+                )
 
-                    # Calculate accuracy metrics
-                    metrics = get_accuracy_metrics(outputs, targets)
-                    total_val_pixels += metrics['total_pixels']
-                    correct_val_pixels += metrics['correct_pixels']
-                    total_val_grids += metrics['total_grids']
-                    correct_val_grids += metrics['correct_grids']
-                    total_val_background_pixels += metrics['total_background_pixels']
-                    correct_val_background_pixels += metrics['correct_background_pixels']
-                    total_val_foreground_pixels += metrics['total_foreground_pixels']
-                    correct_val_foreground_pixels += metrics['correct_foreground_pixels']
+                aggregate_metrics(val_metrics, batch_metrics)
 
-                    # Update progress bar
-                    pbar.set_postfix({
-                        'CE Loss': val_loss / (pbar.n + 1),
-                        'Pixel Accuracy': f"{100. * metrics['pixel_accuracy']:.2f} %",
-                        'Grid accuracy': f"{100. * metrics['grid_accuracy']:.2f} %",
-                        'Background accuracy': f"{100. * metrics['background_accuracy']:.2f} %",
-                        'Foreground accuracy': f"{100. * metrics['foreground_accuracy']:.2f} %"
-                    })
-                    pbar.update(1)
+                # Update progress bar
+                pbar.set_postfix({
+                    'CE Loss': batch_metrics["loss"] / (pbar.n + 1),
+                    'Pixel Accuracy': f"{100. * batch_metrics['pixel_accuracy']:.2f} %",
+                    'Grid accuracy': f"{100. * batch_metrics['grid_accuracy']:.2f} %",
+                    'Background accuracy': f"{100. * batch_metrics['background_accuracy']:.2f} %",
+                    'Foreground accuracy': f"{100. * batch_metrics['foreground_accuracy']:.2f} %"
+                })
+                pbar.update(1)
 
-        # Per epoch metrics
-        avg_val_loss = val_loss / len(val_dataloader)
-        val_pixel_accuracy = 100. * correct_val_pixels / total_val_pixels
-        val_grid_accuracy = 100. * correct_val_grids / total_val_grids
-        val_background_accuracy = 100. * correct_val_background_pixels / total_val_background_pixels
-        val_foreground_accuracy = 100. * correct_val_foreground_pixels / total_val_foreground_pixels
-
-        # Log metrics to wandb
-        wandb.log({
-            "epoch": epoch + 1,
-            "train_loss": avg_train_loss,
-            "train_pixel_accuracy": train_pixel_accuracy,
-            "train_grid_accuracy": train_grid_accuracy,
-            "train_background_accuracy": train_background_accuracy,
-            "train_foreground_accuracy": train_foreground_accuracy,
-            "val_loss": avg_val_loss,
-            "val_pixel_accuracy": val_pixel_accuracy,
-            "val_grid_accuracy": val_grid_accuracy,
-            "val_background_accuracy": val_background_accuracy,
-            "val_foreground_accuracy": val_foreground_accuracy,
-        })
+        if wandb_tracking:
+            log_metrics_to_wandb(train_metrics, type="train")
+            log_metrics_to_wandb(val_metrics, type="val")
 
         # Step the scheduler if provided
         if scheduler:
-            scheduler.step(avg_val_loss)
+            scheduler.step(val_metrics["loss"])
 
     # Save the model
-    model_name = f"{architecture}_{epochs}epochs_lr{learning_rate}.pt"
+    os.makedirs(save_folder, exist_ok=True)
+    model_name = f"{params['architecture']}_{epochs}epochs_lr{learning_rate}.pt"
     model_path = os.path.join(save_folder, model_name)
     torch.save(model.state_dict(), model_path)
-    wandb.save(model_name)
+    print(f"Model saved to {model_path}")
 
-    # Finish the wandb run
-    wandb.finish()
+    if test:
+        eval_model(
+            model,
+            test_dataloader,
+            loss_criterion,
+            acc_criterion=acc_criterion,
+            device=device,
+            save_results=True,
+            model_name=model_name,
+            results_dir="results",
+            wandb_tracking=wandb_tracking
+        )
+
+    if wandb_tracking:
+        wandb.save(model_path)
+        wandb.finish()
 
 
 def eval_model(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
-    criterion: torch.nn.Module = torch.nn.CrossEntropyLoss(),
-    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    loss_criterion: torch.nn.Module = torch.nn.CrossEntropyLoss(),
+    acc_criterion: torch.nn.Module = None,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    save_results: bool = True,
+    model_name: str = "vision_model.pt",
+    results_dir: str = "results",
+    wandb_tracking: bool = True
 ) -> dict:
     """
     Evaluates a model on a given dataloader.
+    Saves results to a CSV file if save_results is True.
 
     Args:
         model (torch.nn.Module): model to evaluate
@@ -329,60 +323,79 @@ def eval_model(
     Returns:
         dict: evaluation metrics
     """
-    model.eval()
-    total_loss = 0.0
-    total_pixels = 0
-    correct_pixels = 0
-    total_grids = 0
-    correct_grids = 0
-    total_background_pixels = 0
-    correct_background_pixels = 0
-    total_foreground_pixels = 0
-    correct_foreground_pixels = 0
-
-    with torch.no_grad():
-        with tqdm(total=len(dataloader), desc="Evaluation", unit="batch") as pbar:
-            for inputs, targets in dataloader:
-                inputs, targets = inputs.to(device), targets.to(device)
-                targets = targets.squeeze(1)  # Remove the channel dimension from targets
-                outputs = model(inputs)
-                loss = criterion(outputs, targets.squeeze(1).long())
-                total_loss += loss.item()
-
-                metrics = get_accuracy_metrics(outputs, targets)
-                total_pixels += metrics['total_pixels']
-                correct_pixels += metrics['correct_pixels']
-                total_grids += metrics['total_grids']
-                correct_grids += metrics['correct_grids']
-                total_background_pixels += metrics['total_background_pixels']
-                correct_background_pixels += metrics['correct_background_pixels']
-                total_foreground_pixels += metrics['total_foreground_pixels']
-                correct_foreground_pixels += metrics['correct_foreground_pixels']
-
-                # Update progress bar
-                pbar.set_postfix({
-                    'CE Loss': loss.item(),
-                    'Pixel Accuracy': f"{100. * metrics['pixel_accuracy']:.2f} %",
-                    'Grid accuracy': f"{100. * metrics['grid_accuracy']:.2f} %",
-                    'Background accuracy': f"{100. * metrics['background_accuracy']:.2f} %",
-                    'Foreground accuracy': f"{100. * metrics['foreground_accuracy']:.2f} %"
-                })
-                pbar.update(1)
-
-    # Per epoch metrics
-    avg_loss = total_loss / len(dataloader)
-    pixel_accuracy = 100. * correct_pixels / total_pixels
-    grid_accuracy = 100. * correct_grids / total_grids
-    background_accuracy = 100. * correct_background_pixels / total_background_pixels
-    foreground_accuracy = 100. * correct_foreground_pixels / total_foreground_pixels
-
-    return {
-        "Average Loss": avg_loss,
-        "pixel_accuracy": pixel_accuracy,
-        "grid_accuracy": grid_accuracy,
-        "background_accuracy": background_accuracy,
-        "foreground_accuracy": foreground_accuracy
+    eval_metrics = {
+        "loss": 0.0,
+        "accuracy": 0.0,
+        "total_pixels": 0,
+        "correct_pixels": 0,
+        "total_grids": 0,
+        "correct_grids": 0,
+        "total_background_pixels": 0,
+        "correct_background_pixels": 0,
+        "total_foreground_pixels": 0,
+        "correct_foreground_pixels": 0,
+        "num_batches": 0
     }
+
+    results = {
+        "sample_id": [],
+        "input": [],
+        "target": [],
+        "predicted": [],
+        "padded_input": [],
+        "padded_target": [],
+        "padded_predicted": []
+    }
+
+    model.eval()
+    unpad_transform = UnpadTransform()
+    with tqdm(total=len(dataloader), desc="Evaluation", unit="batch") as pbar:
+        for metadata, inputs, targets in dataloader:
+            outputs, batch_metrics = model.process_one_batch(
+                (inputs, targets),
+                None,
+                loss_criterion,
+                acc_criterion=acc_criterion,
+                device=device,
+                mode="eval"
+            )
+            aggregate_metrics(eval_metrics, batch_metrics)
+
+            results["sample_id"] += metadata["sample_id"]
+
+            inputs = inputs.squeeze().int()
+            targets = targets.squeeze().int()
+            outputs = outputs.argmax(1).squeeze().int()
+
+            results["padded_input"] += inputs.cpu().numpy().tolist()
+            results["padded_target"] += targets.cpu().numpy().tolist()
+            results["padded_predicted"] += outputs.cpu().numpy().tolist()
+
+            # unpad the input, output, and target grids
+            unpadded_inputs = [unpad_transform(grid, input_dims) for grid, input_dims in zip(inputs, zip(*metadata["input_dims"]))]
+            unpadded_targets = [unpad_transform(grid, output_dims) for grid, output_dims in zip(targets, zip(*metadata["output_dims"]))]
+            unpadded_outputs = [unpad_transform(grid, output_dims) for grid, output_dims in zip(outputs, zip(*metadata["output_dims"]))]
+
+            results["input"] += [unpadded_input.cpu().numpy().tolist() for unpadded_input in unpadded_inputs]
+            results["target"] += [unpadded_target.cpu().numpy().tolist() for unpadded_target in unpadded_targets]
+            results["predicted"] += [unpadded_output.cpu().numpy().tolist() for unpadded_output in unpadded_outputs]
+
+            # Update progress bar
+            pbar.update(1)
+
+    # Print metrics
+    print("Evaluation Metrics:", eval_metrics)
+
+    # Save results
+    os.makedirs(results_dir, exist_ok=True)
+    results_file = os.path.join(results_dir, f"{model_name.split('.')[0]}_eval_results.csv")
+    test_df = pd.DataFrame(results)
+    test_df.to_csv(results_file, index=False)
+    print(f"Results saved to {results_file}")
+
+    if wandb_tracking:
+        log_metrics_to_wandb(eval_metrics, type="eval")
+        wandb.save(results_file)
 
 
 def plot_batch(models: List[torch.nn.Module], inputs: torch.Tensor, targets: torch.Tensor):
@@ -488,3 +501,35 @@ def get_accuracy_metrics(outputs: torch.Tensor, targets: torch.Tensor, backgroun
         "correct_foreground_pixels": correct_foreground_pixels,
         "foreground_accuracy": foreground_accuracy
     }
+
+
+def aggregate_metrics(metrics: dict, batch_metrics: dict):
+    """Aggregates batch metrics into the metrics dictionary"""
+    metrics["loss"] += batch_metrics["loss"]
+    metrics["total_pixels"] += batch_metrics["total_pixels"]
+    metrics["correct_pixels"] += batch_metrics["correct_pixels"]
+    metrics["total_grids"] += batch_metrics["total_grids"]
+    metrics["correct_grids"] += batch_metrics["correct_grids"]
+    metrics["total_background_pixels"] += batch_metrics["total_background_pixels"]
+    metrics["correct_background_pixels"] += batch_metrics["correct_background_pixels"]
+    metrics["total_foreground_pixels"] += batch_metrics["total_foreground_pixels"]
+    metrics["correct_foreground_pixels"] += batch_metrics["correct_foreground_pixels"]
+
+    metrics["accuracy"] = (metrics["accuracy"] * metrics["num_batches"] + batch_metrics["accuracy"]) / \
+                          (metrics["num_batches"] + 1)
+    metrics["pixel_accuracy"] = 100. * metrics["correct_pixels"] / metrics["total_pixels"]
+    metrics["grid_accuracy"] = 100. * metrics["correct_grids"] / metrics["total_grids"]
+    metrics["background_accuracy"] = 100. * metrics["correct_background_pixels"] / metrics["total_background_pixels"]
+    metrics["foreground_accuracy"] = 100. * metrics["correct_foreground_pixels"] / metrics["total_foreground_pixels"]
+    metrics["num_batches"] += 1
+
+    return metrics
+
+
+def log_metrics_to_wandb(metrics: dict, type: str = "train"):
+    """Logs the metrics to wandb"""
+    filtered_metrics = [key for key in metrics.keys() if ("accuracy" in key) or ("loss" in key)]
+
+    wandb.log({
+        f"{type}_{metric}": metrics[metric] for metric in filtered_metrics
+    })
