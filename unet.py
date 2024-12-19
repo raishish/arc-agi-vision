@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import get_accuracy_metrics
 
 
 class EncoderBlock(nn.Module):
@@ -96,53 +95,3 @@ class UNet(nn.Module):
             return logits, probs
 
         return probs
-
-    def process_one_batch(
-        self,
-        data: tuple,
-        optimizer: torch.optim.Optimizer,
-        loss_criterion: torch.nn.Module,
-        acc_criterion=None,
-        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        mode: str = "eval",
-    ):
-        """
-        Processes one batch of data.
-
-        Args:
-            data: tuple of (input, target) tensors
-            optimizer: optimizer
-            loss_criterion: loss criterion
-            acc_criterion (optional): accuracy criterion
-            device (torch.device): device
-            mode (str): mode to use (train, eval, or test)
-
-        Returns:
-            tuple: (outputs, metrics)
-        """
-        # Move data to the device
-        inputs, targets = data[0].to(device), data[1].to(device).squeeze()
-
-        # Forward pass
-        logits, outputs = self.forward(inputs, return_logits=True)
-
-        # Calculate loss
-        loss = loss_criterion(logits, targets.long())
-
-        # Backpropagate
-        if mode == "train":
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        # Calculate accuracy
-        if acc_criterion:
-            batch_acc = acc_criterion(outputs, targets)
-        else:
-            batch_acc = None
-
-        metrics = get_accuracy_metrics(outputs, targets)
-        metrics["loss"] = loss.item()
-        metrics["accuracy"] = batch_acc.item()
-
-        return outputs, metrics

@@ -2,7 +2,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
-from utils import get_accuracy_metrics
 
 
 def init_weights(m):
@@ -437,53 +436,3 @@ class Segmenter(nn.Module):
         x = x[:, num_extra_tokens:]
 
         return self.decoder.get_attention_map(x, layer_id)
-
-    def process_one_batch(
-        self,
-        data: tuple,
-        optimizer: torch.optim.Optimizer,
-        loss_criterion: torch.nn.Module,
-        acc_criterion=None,
-        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        mode: str = "eval",
-    ):
-        """
-        Process one batch of training or validation data
-
-        Args:
-            data (torch.Tensor): tuple of (input, target) tensors
-            optimizer (torch.optim.Optimizer): optimizer to use
-            loss_criterion (torch.nn.Module): loss criterion to use
-            acc_criterion (torch.nn.Module, optional): accuracy criterion to use
-            device (torch.device): device to use
-            mode (str): mode to use (train, eval, or test)
-
-        Returns:
-            tuple: (outputs, metrics)
-        """
-        # Move data to the device
-        inputs, targets = data[0].to(device), data[1].to(device).squeeze()
-
-        # Forward pass
-        logits, outputs = self.forward(inputs, return_logits=True)
-
-        # Calculate loss
-        loss = loss_criterion(logits, targets.long())
-
-        # Backpropagate
-        if mode == "train":
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        # Calculate accuracy
-        if acc_criterion:
-            batch_acc = acc_criterion(outputs, targets)
-        else:
-            batch_acc = None
-
-        metrics = get_accuracy_metrics(outputs, targets)
-        metrics["loss"] = loss.item()
-        metrics["accuracy"] = batch_acc.item()
-
-        return outputs, metrics

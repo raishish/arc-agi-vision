@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from utils import get_accuracy_metrics
 
 
 class Encoder(nn.Module):
@@ -49,8 +48,7 @@ class Decoder(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, num_classes * output_dim),
             nn.ReLU(),
-            nn.Unflatten(1, (num_classes, h, w)),
-            nn.Softmax2d()
+            nn.Unflatten(1, (num_classes, h, w))
         )
 
     def forward(self, z):
@@ -84,67 +82,16 @@ class VAE(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, return_logits: bool = False):
+        """
+        return_logits: return logits if True
+        """
         mu, logvar = self.encoder(x)
         z = self.reparameterize(mu, logvar)
-        x_reconstructed = self.decoder(z)
-        return x_reconstructed, mu, logvar
+        logits = self.decoder(z)
 
-    def process_one_batch(
-        self,
-        data: tuple,
-        optimizer: torch.optim.Optimizer,
-        loss_criterion: torch.nn.Module,
-        acc_criterion=None,
-        device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-        mode: str = "eval",
-    ):
-        """
-        Processes one batch of data.
+        probs = torch.softmax(logits, dim=1)
+        if return_logits:
+            logits, probs, mu, logvar
 
-        Args:
-            data: tuple of (input, target) tensors
-            optimizer: optimizer
-            loss_criterion: loss criterion
-            acc_criterion (optional): accuracy criterion
-            device (torch.device): device
-            mode (str): mode to use (train, eval, or test)
-
-        Returns:
-            tuple: (outputs, metrics)
-        """
-        # Move data to the device
-        inputs, targets = data[0].to(device), data[1].to(device).squeeze()
-
-        # Forward pass
-        outputs, mu, logvar = self.forward(inputs)
-
-        # Calculate loss
-        recon_loss = loss_criterion(outputs, targets.long())
-        kl_loss = KL_Loss(mu, logvar)
-        loss = recon_loss + kl_loss
-
-        # Backpropagate
-        if mode == "train":
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-        # Calculate accuracy
-        if acc_criterion:
-            batch_acc = acc_criterion(outputs, targets)
-        else:
-            batch_acc = None
-
-        metrics = get_accuracy_metrics(outputs, targets)
-        metrics["loss"] = loss.item()
-        metrics["reconstruction_loss"] = recon_loss.item()
-        metrics["kl_loss"] = kl_loss.item()
-        metrics["accuracy"] = batch_acc.item()
-
-        return outputs, metrics
-
-
-def KL_Loss(mu, logvar):
-    """KL Divergence loss"""
-    return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return logits, mu, logvar

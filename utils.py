@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from typing import List
 import os
 import pandas as pd
+from losses import get_loss
 
 
 class ARCDataset(Dataset):
@@ -75,24 +76,21 @@ class UnpadTransform:
         return unpadded_grid
 
 
-def get_class_weights(dataloader: torch.utils.data.DataLoader) -> torch.Tensor:
+def get_class_weights(batch_targets: torch.Tensor, num_classes: int = 10) -> torch.Tensor:
     """
-    Get class weights for a given dataloader.
+    Get class weights for a given batch of targets.
 
     Args:
-        dataloader (torch.utils.data.DataLoader): dataloader
+        batch_targets (torch.Tensor): batch of targets
+        num_classes (int, optional): number of classes. Defaults to 10.
 
     Returns:
         torch.Tensor: class weights
     """
-    targets = []
-    for _, _, batch_targets in dataloader:
-        targets.append(batch_targets)
-
-    targets = torch.cat(targets, dim=0)
-    unique_values, counts = torch.unique(targets, return_counts=True)
+    unique_values, counts = torch.unique(batch_targets, return_counts=True)
     freqs = counts / counts.sum()
-    class_weights = 1.0 / freqs
+    class_weights = torch.ones(num_classes)
+    class_weights[unique_values.long()] = 1.0 / freqs
 
     return class_weights
 
@@ -143,15 +141,76 @@ def get_dataloaders(
     return train_dataloader, val_dataloader
 
 
+def process_one_batch(
+    model,
+    data: tuple,
+    optimizer: torch.optim.Optimizer,
+    loss_criteria: List[str] = ['ce'],
+    loss_weights: List[float] = [1.],
+    acc_criterion=None,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    mode: str = "eval",
+):
+    """
+    Processes one batch of data.
+
+    Args:
+        data: tuple of (input, target) tensors
+        optimizer: optimizer
+        loss_criterion: loss criterion
+        acc_criterion (optional): accuracy criterion
+        device (torch.device): device
+        mode (str): mode to use (train, eval, or test)
+
+    Returns:
+        tuple: (outputs, metrics)
+    """
+    # Move data to the device
+    inputs, targets = data[0].to(device), data[1].to(device).squeeze()
+    class_weights = get_class_weights(targets)
+
+    # Forward pass
+    logits, outputs = model.forward(inputs, return_logits=True)
+
+    # Calculate loss
+    total_loss = 0
+    losses = {}
+    for loss_criterion, loss_weight in zip(loss_criteria, loss_weights):
+        loss_function = get_loss(loss_criterion, class_weights=class_weights)
+        loss = loss_function(logits, targets.long())
+        losses[f"{loss_criterion}_loss"] = loss
+        total_loss += loss * loss_weight
+
+    # Backpropagate
+    if mode == "train":
+        optimizer.zero_grad()
+        total_loss.backward()
+        optimizer.step()
+
+    # Calculate accuracy
+    if acc_criterion:
+        batch_acc = acc_criterion(outputs, targets)
+    else:
+        batch_acc = None
+
+    metrics = get_accuracy_metrics(outputs, targets)
+    metrics["loss"] = total_loss.item()
+    metrics.update(losses)
+    metrics["accuracy"] = batch_acc.item()
+
+    return outputs, metrics
+
+
 def train_model(
     model: torch.nn.Module,
     train_dataloader: torch.utils.data.DataLoader,
     val_dataloader: torch.utils.data.DataLoader,
     epochs: int,
-    loss_criterion: torch.nn.Module,
-    acc_criterion: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler = None,
+    loss_criteria: List[str] = ['ce'],
+    loss_weights: List[float] = [1.],
+    acc_criterion: torch.nn.Module = None,
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     save_folder: str = "models",
     wandb_tracking: bool = True,
@@ -167,9 +226,11 @@ def train_model(
         train_dataloader (torch.utils.data.DataLoader): dataloader for training
         val_dataloader (torch.utils.data.DataLoader): dataloader for validation/testing
         epochs (int): number of epochs to train the model
-        loss_criterion (torch.nn.Module): loss function
         optimizer (torch.optim.Optimizer): optimizer
         scheduler (torch.optim.lr_scheduler, optional): learning rate scheduler
+        loss_criteria (List[str]): List of loss criteria to use
+        loss_weights (List[float]): List of loss weights
+        acc_criterion (torch.nn.Module, optional): accuracy criterion
         device (torch.device, optional): device to use for training
         save_folder (str, optional): folder to save the model
         wandb_tracking (bool, optional): whether to track metrics with wandb
@@ -193,8 +254,12 @@ def train_model(
         model.train()
         train_metrics = {
             "loss": 0.0,
-            "reconstruction_loss": 0.0,
+            "ce_loss": 0.0,
             "kl_loss": 0.0,
+            "grid_loss": 0.0,
+            "focal_loss": 0.0,
+            "dice_loss": 0.0,
+            "tversky_loss": 0.0,
             "accuracy": 0.0,
             "total_pixels": 0,
             "correct_pixels": 0,
@@ -209,10 +274,12 @@ def train_model(
 
         with tqdm(total=len(train_dataloader), desc=f"Train Epoch {epoch + 1}/{epochs}", unit="batch") as pbar:
             for _, inputs, targets in train_dataloader:
-                _, batch_metrics = model.process_one_batch(
+                _, batch_metrics = process_one_batch(
+                    model,
                     (inputs, targets),
                     optimizer,
-                    loss_criterion,
+                    loss_criteria=loss_criteria,
+                    loss_weights=loss_weights,
                     acc_criterion=acc_criterion,
                     device=device,
                     mode="train"
@@ -221,21 +288,19 @@ def train_model(
                 aggregate_metrics(train_metrics, batch_metrics)
 
                 # Update progress bar
-                pbar.set_postfix({
-                    'CE Loss': batch_metrics["loss"] / (pbar.n + 1),
-                    'Pixel accuracy': f"{100. * batch_metrics['pixel_accuracy']:.2f} %",
-                    'Grid accuracy': f"{100. * batch_metrics['grid_accuracy']:.2f} %",
-                    'Background accuracy': f"{100. * batch_metrics['background_accuracy']:.2f} %",
-                    'Foreground accuracy': f"{100. * batch_metrics['foreground_accuracy']:.2f} %"
-                })
+                pbar.set_postfix(batch_metrics)
                 pbar.update(1)
 
         # Validation phase
         model.eval()
         val_metrics = {
             "loss": 0.0,
-            "reconstruction_loss": 0.0,
+            "ce_loss": 0.0,
             "kl_loss": 0.0,
+            "grid_loss": 0.0,
+            "focal_loss": 0.0,
+            "dice_loss": 0.0,
+            "tversky_loss": 0.0,
             "accuracy": 0.0,
             "total_pixels": 0,
             "correct_pixels": 0,
@@ -250,10 +315,12 @@ def train_model(
 
         with tqdm(total=len(val_dataloader), desc=f"Validation Epoch {epoch + 1}/{epochs}", unit="batch") as pbar:
             for _, inputs, targets in val_dataloader:
-                _, batch_metrics = model.process_one_batch(
+                _, batch_metrics = process_one_batch(
+                    model,
                     (inputs, targets),
                     optimizer,
-                    loss_criterion,
+                    loss_criteria=loss_criteria,
+                    loss_weights=loss_weights,
                     acc_criterion=acc_criterion,
                     device=device,
                     mode="eval"
@@ -262,13 +329,7 @@ def train_model(
                 aggregate_metrics(val_metrics, batch_metrics)
 
                 # Update progress bar
-                pbar.set_postfix({
-                    'CE Loss': batch_metrics["loss"] / (pbar.n + 1),
-                    'Pixel Accuracy': f"{100. * batch_metrics['pixel_accuracy']:.2f} %",
-                    'Grid accuracy': f"{100. * batch_metrics['grid_accuracy']:.2f} %",
-                    'Background accuracy': f"{100. * batch_metrics['background_accuracy']:.2f} %",
-                    'Foreground accuracy': f"{100. * batch_metrics['foreground_accuracy']:.2f} %"
-                })
+                pbar.set_postfix(batch_metrics)
                 pbar.update(1)
 
         if wandb_tracking:
@@ -290,7 +351,8 @@ def train_model(
         eval_model(
             model,
             test_dataloader,
-            loss_criterion,
+            loss_criteria=loss_criteria,
+            loss_weights=loss_weights,
             acc_criterion=acc_criterion,
             device=device,
             save_results=True,
@@ -307,7 +369,8 @@ def train_model(
 def eval_model(
     model: torch.nn.Module,
     dataloader: torch.utils.data.DataLoader,
-    loss_criterion: torch.nn.Module = torch.nn.CrossEntropyLoss(),
+    loss_criteria: List[str] = ['ce'],
+    loss_weights: List[float] = [1.],
     acc_criterion: torch.nn.Module = None,
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     save_results: bool = True,
@@ -329,8 +392,12 @@ def eval_model(
     """
     eval_metrics = {
         "loss": 0.0,
-        "reconstruction_loss": 0.0,
+        "ce_loss": 0.0,
         "kl_loss": 0.0,
+        "grid_loss": 0.0,
+        "focal_loss": 0.0,
+        "dice_loss": 0.0,
+        "tversky_loss": 0.0,
         "accuracy": 0.0,
         "total_pixels": 0,
         "correct_pixels": 0,
@@ -357,10 +424,12 @@ def eval_model(
     unpad_transform = UnpadTransform()
     with tqdm(total=len(dataloader), desc="Evaluation", unit="batch") as pbar:
         for metadata, inputs, targets in dataloader:
-            outputs, batch_metrics = model.process_one_batch(
+            outputs, batch_metrics = process_one_batch(
+                model,
                 (inputs, targets),
                 None,
-                loss_criterion,
+                loss_criteria=loss_criteria,
+                loss_weights=loss_weights,
                 acc_criterion=acc_criterion,
                 device=device,
                 mode="eval"
@@ -378,19 +447,24 @@ def eval_model(
             results["padded_predicted"] += outputs.cpu().numpy().tolist()
 
             # unpad the input, output, and target grids
-            unpadded_inputs = [unpad_transform(grid, input_dims) for grid, input_dims in zip(inputs, zip(*metadata["input_dims"]))]
-            unpadded_targets = [unpad_transform(grid, output_dims) for grid, output_dims in zip(targets, zip(*metadata["output_dims"]))]
-            unpadded_outputs = [unpad_transform(grid, output_dims) for grid, output_dims in zip(outputs, zip(*metadata["output_dims"]))]
+            unpadded_inputs = [unpad_transform(grid, input_dims) for grid, input_dims in zip(
+                inputs, zip(*metadata["input_dims"]))]
+            unpadded_targets = [unpad_transform(grid, output_dims) for grid, output_dims in zip(
+                targets, zip(*metadata["output_dims"]))]
+            unpadded_outputs = [unpad_transform(grid, output_dims) for grid, output_dims in zip(
+                outputs, zip(*metadata["output_dims"]))]
 
             results["input"] += [unpadded_input.cpu().numpy().tolist() for unpadded_input in unpadded_inputs]
             results["target"] += [unpadded_target.cpu().numpy().tolist() for unpadded_target in unpadded_targets]
             results["predicted"] += [unpadded_output.cpu().numpy().tolist() for unpadded_output in unpadded_outputs]
 
             # Update progress bar
+            pbar.set_postfix(batch_metrics)
             pbar.update(1)
 
     # Print metrics
     filtered_metrics = [key for key in eval_metrics.keys() if "loss" in key or "accuracy" in key]
+    print(eval_metrics)
     print("Evaluation Metrics:")
     print("-" * 50)
     for metric in filtered_metrics:
@@ -515,11 +589,9 @@ def get_accuracy_metrics(outputs: torch.Tensor, targets: torch.Tensor, backgroun
 
 def aggregate_metrics(metrics: dict, batch_metrics: dict):
     """Aggregates batch metrics into the metrics dictionary"""
-    metrics["loss"] += batch_metrics["loss"]
-    if 'reconstruction_loss' in batch_metrics:
-        metrics["reconstruction_loss"] += batch_metrics["reconstruction_loss"]
-    if 'kl_loss' in batch_metrics:
-        metrics["kl_loss"] += batch_metrics["kl_loss"]
+    loss_keys = [key for key in batch_metrics.keys() if "loss" in key]
+    for loss_key in loss_keys:
+        metrics[loss_key] += batch_metrics[loss_key]
     metrics["total_pixels"] += batch_metrics["total_pixels"]
     metrics["correct_pixels"] += batch_metrics["correct_pixels"]
     metrics["total_grids"] += batch_metrics["total_grids"]
