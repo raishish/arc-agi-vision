@@ -139,6 +139,15 @@ class TverskyLoss(torch.nn.Module):
         return 1 - tversky_scores.mean()
 
 
+class KLLoss(torch.nn.Module):
+    """KL Divergence loss"""
+    def __init__(self):
+        super(KLLoss, self).__init__()
+
+    def forward(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+
 def get_loss(
     loss_type: str,
     class_weights: Optional[torch.Tensor] = None,
@@ -161,6 +170,8 @@ def get_loss(
         return DiceLoss(weight=class_weights)
     elif loss_type == "tversky":
         return TverskyLoss(alpha=params.get("alpha", 0.3), beta=params.get("beta", 0.7), weight=class_weights)
+    elif loss_type == "kl":
+        return KLLoss()
     else:
         raise ValueError(f"Invalid loss type: {loss_type}")
 
