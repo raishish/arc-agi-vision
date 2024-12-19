@@ -138,8 +138,17 @@ class PixelCNNPlusPlus(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
-    def forward(self, x):
-        return self.layers(x)
+    def forward(self, x: torch.Tensor, return_logits: bool = False):
+        """
+        return_logits: return logits if True
+        """
+        logits = self.layers(x)
+        probs = torch.softmax(logits, dim=1)
+
+        if return_logits:
+            return logits, probs
+
+        return probs
 
     def process_one_batch(
         self,
@@ -168,10 +177,10 @@ class PixelCNNPlusPlus(nn.Module):
         inputs, targets = data[0].to(device), data[1].to(device).squeeze()
 
         # Forward pass
-        outputs = self.forward(inputs)
+        logits, outputs = self.forward(inputs, return_logits=True)
 
         # Calculate loss
-        loss = loss_criterion(outputs, targets.long())
+        loss = loss_criterion(logits, targets.long())
 
         # Backpropagate
         if mode == "train":

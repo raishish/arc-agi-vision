@@ -70,7 +70,10 @@ class UNet(nn.Module):
         # Output Layer
         self.output_layer = nn.Conv2d(base_channels, out_channels, kernel_size=1)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, return_logits: bool = False):
+        """
+        return_logits: return logits if True
+        """
         # Encoder
         skips = []
         for enc_block in self.enc_blocks:
@@ -87,7 +90,12 @@ class UNet(nn.Module):
             x = dec_block(x, skip)
 
         # Output
-        return torch.softmax(self.output_layer(x), dim=1)
+        logits = self.output_layer(x)
+        probs = torch.softmax(logits, dim=1)
+        if return_logits:
+            return logits, probs
+
+        return probs
 
     def process_one_batch(
         self,
@@ -116,10 +124,10 @@ class UNet(nn.Module):
         inputs, targets = data[0].to(device), data[1].to(device).squeeze()
 
         # Forward pass
-        outputs = self.forward(inputs)
+        logits, outputs = self.forward(inputs, return_logits=True)
 
         # Calculate loss
-        loss = loss_criterion(outputs, targets.long())
+        loss = loss_criterion(logits, targets.long())
 
         # Backpropagate
         if mode == "train":

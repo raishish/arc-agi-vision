@@ -401,7 +401,10 @@ class Segmenter(nn.Module):
         )
         return nwd_params
 
-    def forward(self, im):
+    def forward(self, im, return_logits: bool = False):
+        """
+        return_logits: return logits if True
+        """
         H, W = im.size(2), im.size(3)
 
         x = self.encoder(im, return_features=True)
@@ -414,9 +417,12 @@ class Segmenter(nn.Module):
 
         masks = self.decoder(x, (H, W))
 
-        masks = F.interpolate(masks, size=(H, W), mode="bilinear")
+        logits = F.interpolate(masks, size=(H, W), mode="bilinear")
+        probs = torch.softmax(logits, dim=1)
+        if return_logits:
+            return logits, probs
 
-        return masks
+        return probs
 
     def get_attention_map_enc(self, im, layer_id):
         return self.encoder.get_attention_map(im, layer_id)
@@ -459,10 +465,10 @@ class Segmenter(nn.Module):
         inputs, targets = data[0].to(device), data[1].to(device).squeeze()
 
         # Forward pass
-        outputs = self.forward(inputs)
+        logits, outputs = self.forward(inputs, return_logits=True)
 
         # Calculate loss
-        loss = loss_criterion(outputs, targets.long())
+        loss = loss_criterion(logits, targets.long())
 
         # Backpropagate
         if mode == "train":
