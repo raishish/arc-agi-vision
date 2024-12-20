@@ -115,14 +115,16 @@ class MaskedConv2d(nn.Conv2d):
 
 
 class PixelCNNPlusPlus(nn.Module):
-    def __init__(self, input_channels, n_classes, hidden_channels, num_layers=6):
+    def __init__(self, input_channels, n_classes, hidden_channels, num_layers=6, dropout=0.5):
         super().__init__()
         self.layers = nn.Sequential(
             MaskedConv2d('A', input_channels, hidden_channels, kernel_size=7, padding=3),
             nn.ReLU(),
+            nn.Dropout(dropout),
             *[nn.Sequential(
                 MaskedConv2d('B', hidden_channels, hidden_channels, kernel_size=3, padding=1),
-                nn.ReLU()) for _ in range(num_layers)],
+                nn.ReLU(),
+                nn.Dropout(dropout)) for _ in range(num_layers)],
             nn.Conv2d(hidden_channels, n_classes, kernel_size=1)
         )
 
