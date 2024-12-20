@@ -487,6 +487,7 @@ def eval_model(
     os.makedirs(results_dir, exist_ok=True)
     results_file = os.path.join(results_dir, f"{model_name.split('.')[0]}_eval_results.csv")
     test_df = pd.DataFrame(results)
+    test_df['is_correct'] = test_df.apply(lambda row: row['predicted'] == row['target'], axis=1)
     test_df.to_csv(results_file, index=False)
     print(f"Results saved to {results_file}")
 
