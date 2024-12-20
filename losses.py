@@ -162,7 +162,9 @@ def get_loss(
     Returns:
         torch.nn.Module: loss
     """
-    if loss_type == "grid":
+    if loss_type == "ce":
+        return torch.nn.CrossEntropyLoss(weight=class_weights)
+    elif loss_type == "grid":
         return GridLoss(accuracy=params.get("accuracy", "absolute"))
     elif loss_type == "focal":
         return FocalLoss(alpha=class_weights, gamma=params.get("gamma", 2))
