@@ -61,7 +61,7 @@ class FocalLoss(torch.nn.Module):
                 focal_weight = focal_weight * self.alpha
 
         loss = -focal_weight * log_probs
-        loss = loss.sum(dim=1)  # Sum across channels (class dimension)
+        loss = loss.mean(dim=1)  # Sum across channels (class dimension)
 
         return loss.mean()
 
