@@ -89,7 +89,7 @@ def get_class_weights(batch_targets: torch.Tensor, num_classes: int = 10) -> tor
     """
     unique_values, counts = torch.unique(batch_targets, return_counts=True)
     freqs = counts / counts.sum()
-    class_weights = torch.ones(num_classes)
+    class_weights = torch.ones(num_classes).to(batch_targets.device)
     class_weights[unique_values.long()] = 1.0 / freqs
 
     return class_weights
@@ -120,7 +120,7 @@ def get_dataloaders(
     if val_split is None or val_split == 0.:  # No validation set / Test set
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
         print("Dataset size: ", len(dataset))
-        return dataloader, None
+        return dataloader
 
     dataset_size = len(dataset)
     val_size = int(dataset_size * val_split)
@@ -287,8 +287,12 @@ def train_model(
 
                 aggregate_metrics(train_metrics, batch_metrics)
 
-                # Update progress bar
-                pbar.set_postfix(batch_metrics)
+                # Log loss and accuracy metrics
+                pbar.set_postfix({
+                    key: f"{value:.2f}"
+                    for key, value in batch_metrics.items()
+                    if "loss" in key or "accuracy" in key
+                })
                 pbar.update(1)
 
         # Validation phase
@@ -328,17 +332,22 @@ def train_model(
 
                 aggregate_metrics(val_metrics, batch_metrics)
 
-                # Update progress bar
-                pbar.set_postfix(batch_metrics)
+                # Log loss and accuracy metrics
+                pbar.set_postfix({
+                    key: f"{value:.2f}"
+                    for key, value in batch_metrics.items()
+                    if "loss" in key or "accuracy" in key
+                })
                 pbar.update(1)
 
         if wandb_tracking:
-            log_metrics_to_wandb(train_metrics, type="train")
-            log_metrics_to_wandb(val_metrics, type="val")
+            log_metrics_to_wandb(train_metrics, type="train", step=epoch)
+            log_metrics_to_wandb(val_metrics, type="val", step=epoch)
 
         # Step the scheduler if provided
         if scheduler:
             scheduler.step(val_metrics["loss"])
+            wandb.log({"lr": optimizer.param_groups[0]['lr']}, step=epoch)
 
     # Save the model
     os.makedirs(save_folder, exist_ok=True)
@@ -376,7 +385,7 @@ def eval_model(
     save_results: bool = True,
     model_name: str = "vision_model.pt",
     results_dir: str = "results",
-    wandb_tracking: bool = True
+    wandb_tracking: bool = False
 ) -> dict:
     """
     Evaluates a model on a given dataloader.
@@ -458,8 +467,12 @@ def eval_model(
             results["target"] += [unpadded_target.cpu().numpy().tolist() for unpadded_target in unpadded_targets]
             results["predicted"] += [unpadded_output.cpu().numpy().tolist() for unpadded_output in unpadded_outputs]
 
-            # Update progress bar
-            pbar.set_postfix(batch_metrics)
+            # Log loss and accuracy metrics
+            pbar.set_postfix({
+                key: f"{value:.2f}"
+                for key, value in batch_metrics.items()
+                if "loss" in key or "accuracy" in key
+            })
             pbar.update(1)
 
     # Print metrics
@@ -478,11 +491,11 @@ def eval_model(
     print(f"Results saved to {results_file}")
 
     if wandb_tracking:
-        log_metrics_to_wandb(eval_metrics, type="eval")
+        log_metrics_to_wandb(eval_metrics, type="eval", step=0)
         wandb.save(results_file)
 
 
-def plot_batch(models: List[torch.nn.Module], inputs: torch.Tensor, targets: torch.Tensor):
+def plot_batch(models: List[torch.nn.Module], sample_ids: list, inputs: torch.Tensor, targets: torch.Tensor):
     """
     Plots the predicted grids for a batch of inputs and targets.
 
@@ -517,9 +530,9 @@ def plot_batch(models: List[torch.nn.Module], inputs: torch.Tensor, targets: tor
 
     fig, axs = plt.subplots(len(inputs), 2 + len(models), figsize=(2 * (2 + len(models)), 2 * len(inputs)))
 
-    for i, (input_grid, target_grid, predicted_grid) in enumerate(zip(inputs, targets, predicted_grids)):
+    for i, (sample_id, input_grid, target_grid, predicted_grid) in enumerate(zip(sample_ids, inputs, targets, predicted_grids)):
         axs[i][0].imshow(input_grid.squeeze().numpy())
-        axs[i][0].set_title('Input Grid')
+        axs[i][0].set_title('Input - ' + sample_id)
         axs[i][0].axis('off')
 
         axs[i][1].imshow(target_grid.squeeze().numpy())
@@ -591,7 +604,9 @@ def aggregate_metrics(metrics: dict, batch_metrics: dict):
     """Aggregates batch metrics into the metrics dictionary"""
     loss_keys = [key for key in batch_metrics.keys() if "loss" in key]
     for loss_key in loss_keys:
-        metrics[loss_key] += batch_metrics[loss_key]
+        metrics[loss_key] = (metrics[loss_key] * metrics["num_batches"] + batch_metrics[loss_key]) / \
+                             (metrics["num_batches"] + 1)
+
     metrics["total_pixels"] += batch_metrics["total_pixels"]
     metrics["correct_pixels"] += batch_metrics["correct_pixels"]
     metrics["total_grids"] += batch_metrics["total_grids"]
@@ -612,10 +627,10 @@ def aggregate_metrics(metrics: dict, batch_metrics: dict):
     return metrics
 
 
-def log_metrics_to_wandb(metrics: dict, type: str = "train"):
+def log_metrics_to_wandb(metrics: dict, step: int, type: str = "train"):
     """Logs the metrics to wandb"""
     filtered_metrics = [key for key in metrics.keys() if ("accuracy" in key) or ("loss" in key)]
 
     wandb.log({
         f"{type}_{metric}": metrics[metric] for metric in filtered_metrics
-    })
+    }, step=step)
