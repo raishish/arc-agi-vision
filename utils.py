@@ -94,10 +94,15 @@ class FineTuneDataset(Dataset):
         train_outputs = [torch.tensor(train_output, dtype=torch.float32) for train_output in train_outputs]
 
         if self.transform:
-            train_inputs = [self.transform(train_input).unsqueeze(0) for train_input in train_inputs]
+            test_input = self.transform(test_input).unsqueeze(0)
+            test_output = self.transform(test_output)
+
+            train_inputs = [self.transform(train_input).unsqueeze(0)
+                            for train_input in train_inputs]
             train_inputs = torch.cat(train_inputs, dim=0)
 
-            train_outputs = [self.transform(train_output).unsqueeze(0) for train_output in train_outputs]
+            train_outputs = [self.transform(train_output).unsqueeze(0)
+                             for train_output in train_outputs]
             train_outputs = torch.cat(train_outputs, dim=0)
 
         return metadata, (test_input, test_output), (train_inputs, train_outputs)
@@ -218,6 +223,165 @@ def get_dataloaders(
     return train_dataloader, val_dataloader
 
 
+def fine_tune_model(
+    model: torch.nn.Module,
+    data: tuple,
+    epochs: int,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler = None,
+    loss_criteria: List[str] = ['ce'],
+    loss_weights: List[float] = [1.],
+    acc_criterion: torch.nn.Module = None,
+    device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+):
+    """
+    Fine-tunes a model on the given data.
+
+    Args:
+        model (torch.nn.Module): model to train
+        data: tuple of (input, target) tensors
+        optimizer: optimizer
+        scheduler: learning rate scheduler
+        loss_criteria: list of loss criteria
+        loss_weights: list of loss weights
+        acc_criterion (optional): accuracy criterion
+        device: torch device
+    """
+    model.to(device)
+    inputs, targets = data
+    inputs, targets = inputs.transpose(0, 1).to(device), targets.transpose(0, 1).to(device)
+
+    with tqdm(total=epochs, desc=f"Fine-tuning", unit="epoch") as pbar:
+        for epoch in range(epochs):
+            # Training phase
+            model.train()
+            batch_metrics = {}
+
+            _, batch_metrics = process_one_batch(
+                model,
+                (inputs, targets),
+                optimizer,
+                loss_criteria=loss_criteria,
+                loss_weights=loss_weights,
+                acc_criterion=acc_criterion,
+                device=device,
+                mode="train"
+            )
+
+            # Log loss and accuracy metrics
+            pbar.set_postfix({
+                key: f"{value:.2f}"
+                for key, value in batch_metrics.items()
+                if "loss" in key or "accuracy" in key
+            })
+            pbar.update(1)
+
+            # Step the scheduler if provided
+            if scheduler:
+                scheduler.step(batch_metrics["loss"])
+
+    return model
+
+
+def eval_model_with_test_time_tuning(
+    model,
+    fine_tune_dataloader,
+    epochs,
+    optimizer,
+    scheduler: torch.optim.lr_scheduler = None,
+    loss_criteria: List[str] = ['focal'],
+    loss_weights: List[float] = [1.],
+    acc_criterion: torch.nn.Module = None,
+    device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+):
+    results = {
+        "sample_id": [],
+        "input": [],
+        "target": [],
+        "predicted": [],
+        "padded_input": [],
+        "padded_target": [],
+        "padded_predicted": [],
+        "loss": [],
+        "accuracy": [],
+        "foreground_accuracy": [],
+        "background_accuracy": []
+    }
+    unpad_transform = UnpadTransform()
+
+    for idx, (metadata, (test_input, test_output), (train_inputs, train_outputs)) in enumerate(fine_tune_dataloader):
+        print(f"Processing sample {idx}: {metadata['sample_id'][0]}")
+
+        fine_tuned_model = fine_tune_model(
+            model,
+            (train_inputs, train_outputs),
+            epochs,
+            optimizer,
+            scheduler=scheduler,
+            loss_criteria=loss_criteria,
+            loss_weights=loss_weights,
+            acc_criterion=acc_criterion,
+            device=device,
+        )
+        fine_tuned_model.eval()
+
+        total_loss = 0
+        losses = {}
+
+        with torch.no_grad():
+            logits, outputs = fine_tuned_model(test_input, return_logits=True)
+
+        class_weights = get_class_weights(test_output, num_classes=10)
+
+        for loss_criterion, loss_weight in zip(loss_criteria, loss_weights):
+            loss_function = get_loss(loss_criterion, class_weights=class_weights)
+            loss = loss_function(logits, test_output.long())
+            losses[f"{loss_criterion}_loss"] = loss
+            total_loss += loss * loss_weight
+
+        metrics = get_accuracy_metrics(outputs, test_output)
+        accuracy = acc_criterion(outputs, test_output)
+
+        print("Metrics:")
+        print("-" * 50)
+        print(f"Loss: {total_loss:.2f}")
+        print(f"Accuracy (mIOU): {accuracy * 100:.2f}%")
+        print(f"Foreground Accuracy: {metrics['foreground_accuracy'] * 100:.2f}%")
+        print(f"Background Accuracy: {metrics['background_accuracy'] * 100:.2f}%")
+        for loss_criterion, loss in losses.items():
+            print(f"{loss_criterion}: {loss:.2f}")
+
+        results["loss"] += [total_loss.item()]
+        results["accuracy"] += [accuracy.item()]
+        results["foreground_accuracy"] += [metrics["foreground_accuracy"]]
+        results["background_accuracy"] += [metrics["background_accuracy"]]
+
+        predicted = outputs.argmax(1).squeeze()
+        test_input = test_input.squeeze().squeeze().int()
+        test_output = test_output.squeeze().int()
+
+        results["sample_id"] += metadata["sample_id"]
+        results["padded_input"] += [test_input.cpu().numpy().tolist()]
+        results["padded_target"] += [test_output.cpu().numpy().tolist()]
+        results["padded_predicted"] += [predicted.cpu().numpy().tolist()]
+
+        unpadded_input = unpad_transform(test_input, metadata["test"]["input_dims"])
+        unpadded_target = unpad_transform(test_output, metadata["test"]["output_dims"])
+        unpadded_output = unpad_transform(predicted, metadata["test"]["output_dims"])
+
+        results["input"] += [unpadded_input.cpu().numpy().tolist()]
+        results["target"] += [unpadded_target.cpu().numpy().tolist()]
+        results["predicted"] += [unpadded_output.cpu().numpy().tolist()]
+
+    results_dir = "results"
+    os.makedirs(results_dir, exist_ok=True)
+    results_file = os.path.join(results_dir, "test_time_tuning_results.csv")
+    test_df = pd.DataFrame(results)
+    test_df['is_correct'] = test_df.apply(lambda row: row['predicted'] == row['target'], axis=1)
+    test_df.to_csv(results_file, index=False)
+    print(f"Test-time Tuning results saved to: {results_file}")
+
+
 def process_one_batch(
     model,
     data: tuple,
@@ -234,7 +398,8 @@ def process_one_batch(
     Args:
         data: tuple of (input, target) tensors
         optimizer: optimizer
-        loss_criterion: loss criterion
+        loss_criteria: list of loss criteria
+        loss_weights: list of loss weights
         acc_criterion (optional): accuracy criterion
         device (torch.device): device
         mode (str): mode to use (train, eval, or test)
@@ -243,7 +408,8 @@ def process_one_batch(
         tuple: (outputs, metrics)
     """
     # Move data to the device
-    inputs, targets = data[0].to(device), data[1].to(device).squeeze()
+    inputs, targets = data[0].to(device), data[1].to(device).squeeze(1)
+
     class_weights = get_class_weights(targets)
 
     # Forward pass
