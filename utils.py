@@ -8,6 +8,7 @@ from typing import List
 import os
 import pandas as pd
 from losses import get_loss
+import ast
 
 
 class ARCDataset(Dataset):
@@ -41,6 +42,65 @@ class ARCDataset(Dataset):
             output_grid = self.transform(output_grid)
 
         return metadata, input_grid.unsqueeze(0), output_grid.unsqueeze(0)
+
+
+class FineTuneDataset(Dataset):
+    """Dataset used for fine-tuning"""
+    def __init__(self, dataframe, transform=None):
+        """
+        Args:
+            dataframe (pandas.DataFrame): dataframe containing the input and output grids
+            transform (torch.nn.Module, optional): transform to apply to the input and output grids.
+        """
+        self.dataframe = dataframe
+        self.transform = transform
+        self.dataframe['input'] = self.dataframe['input'].apply(ast.literal_eval)
+        self.dataframe['output'] = self.dataframe['output'].apply(ast.literal_eval)
+        self.groups = list(dataframe.groupby('sample_id'))
+        self.groups = [group for group in self.groups if len(group[1]) > 1]
+
+    def __len__(self):
+        return len(self.groups)
+
+    def __getitem__(self, idx):
+        sample_id, group = self.groups[idx]
+        test_row = group.iloc[0]    # the first pair is the test pair
+        train_rows = group.iloc[1:]
+
+        metadata = {
+            'sample_id': sample_id,
+            'test': {
+                'input_dims': (int(test_row['input_grid_width']), int(test_row['input_grid_height'])),
+                'output_dims': (int(test_row['output_grid_width']), int(test_row['output_grid_height']))
+            },
+            'train': [
+                {
+                    'input_dims': (int(row['input_grid_width']), int(row['input_grid_height'])),
+                    'output_dims': (int(row['output_grid_width']), int(row['output_grid_height']))
+                }
+                for _, row in train_rows.iterrows()
+            ]
+        }
+
+        # Get the test pair
+        test_input, test_output = test_row[['input', 'output']]
+        test_input = torch.tensor(test_input, dtype=torch.float32)
+        test_output = torch.tensor(test_output, dtype=torch.float32)
+
+        # Get the train pairs
+        train_inputs = train_rows['input'].tolist()
+        train_outputs = train_rows['output'].tolist()
+        train_inputs = [torch.tensor(train_input, dtype=torch.float32) for train_input in train_inputs]
+        train_outputs = [torch.tensor(train_output, dtype=torch.float32) for train_output in train_outputs]
+
+        if self.transform:
+            train_inputs = [self.transform(train_input).unsqueeze(0) for train_input in train_inputs]
+            train_inputs = torch.cat(train_inputs, dim=0)
+
+            train_outputs = [self.transform(train_output).unsqueeze(0) for train_output in train_outputs]
+            train_outputs = torch.cat(train_outputs, dim=0)
+
+        return metadata, (test_input, test_output), (train_inputs, train_outputs)
 
 
 class PadTransform:
@@ -93,6 +153,23 @@ def get_class_weights(batch_targets: torch.Tensor, num_classes: int = 10) -> tor
     class_weights[unique_values.long()] = 1.0 / freqs
 
     return class_weights
+
+
+def get_fine_tune_dataloader(dataframe, transform=PadTransform((30, 30)), shuffle=False):
+    """
+    Creates a dataloader for fine-tuning.
+
+    Args:
+        dataframe (pandas.DataFrame): dataframe containing the input and output grids
+        transform (torch.nn.Module, optional): transform to apply to the input and output grids
+        shuffle (bool, optional): whether to shuffle the data
+
+    Returns:
+        torch.utils.data.DataLoader: dataloader
+    """
+    dataset = FineTuneDataset(dataframe, transform=transform)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=shuffle)
+    return dataloader
 
 
 def get_dataloaders(
@@ -212,6 +289,7 @@ def train_model(
     loss_weights: List[float] = [1.],
     acc_criterion: torch.nn.Module = None,
     device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    save_model: bool = True,
     save_folder: str = "models",
     wandb_tracking: bool = True,
     test: bool = True,
@@ -621,8 +699,10 @@ def aggregate_metrics(metrics: dict, batch_metrics: dict):
                           (metrics["num_batches"] + 1)
     metrics["pixel_accuracy"] = 100. * metrics["correct_pixels"] / metrics["total_pixels"]
     metrics["grid_accuracy"] = 100. * metrics["correct_grids"] / metrics["total_grids"]
-    metrics["background_accuracy"] = 100. * metrics["correct_background_pixels"] / metrics["total_background_pixels"]
-    metrics["foreground_accuracy"] = 100. * metrics["correct_foreground_pixels"] / metrics["total_foreground_pixels"]
+    metrics["background_accuracy"] = 100. * metrics["correct_background_pixels"] / \
+        metrics["total_background_pixels"] if metrics["total_background_pixels"] > 0 else 0
+    metrics["foreground_accuracy"] = 100. * metrics["correct_foreground_pixels"] / \
+        metrics["total_foreground_pixels"] if metrics["total_foreground_pixels"] > 0 else 0
     metrics["num_batches"] += 1
 
     return metrics
