@@ -4,6 +4,7 @@ Usage: python visualize_results.py <csv_file> <output_file>
 """
 
 import csv
+import pandas as pd
 import json
 import argparse
 import io
@@ -129,6 +130,9 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <h1 style="text-align: center;">{report_title}</h1>
+    <h2 style="text-align: center;">
+     Loss: {loss}, Accuracy (mIOU): {acc}, Foreground Accuracy: {fg_acc}%, Background Accuracy: {bg_acc}%
+    </h2>
     <div class="button-container">
         <button onclick="filterSamples('all')">Show All ({total_count})</button>
         <button onclick="filterSamples('correct')">Show Correct ({correct_count})</button>
@@ -158,13 +162,19 @@ def generate_html(csv_file, output_file, report_title):
     filename = os.path.splitext(os.path.basename(csv_file))[0]
     print(f"Processing {filename}")
 
+    # calculate metrics
+    df = pd.read_csv(csv_file)
+    avg_loss = round(float(df['loss'].mean()), 2)
+    avg_accuracy = round(float(df['accuracy'].mean()), 2)
+    avg_foreground_accuracy = round(float(df['foreground_accuracy'].mean() * 100), 2)
+    avg_background_accuracy = round(float(df['background_accuracy'].mean() * 100), 2)
+    total_count = len(df)
+    correct_count = df['is_correct'].sum()
+    incorrect_count = len(df) - correct_count
+
     with open(csv_file, 'r') as file:
         reader = csv.DictReader(file)
         rows = list(reader)
-
-    total_count = len(rows)
-    correct_count = sum(1 for row in rows if row['is_correct'].lower() == 'true')
-    incorrect_count = len(rows) - correct_count
 
     samples_html = ""
     with tqdm(total=len(rows), desc="Processed grids", unit="grid") as pbar:
@@ -205,6 +215,10 @@ def generate_html(csv_file, output_file, report_title):
         total_count=total_count,
         correct_count=correct_count,
         incorrect_count=incorrect_count,
+        loss=avg_loss,
+        acc=avg_accuracy,
+        fg_acc=avg_foreground_accuracy,
+        bg_acc=avg_background_accuracy,
         content=samples_html
     )
 
