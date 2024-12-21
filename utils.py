@@ -492,7 +492,7 @@ def eval_model(
     print(f"Results saved to {results_file}")
 
     if wandb_tracking:
-        log_metrics_to_wandb(eval_metrics, type="eval", step=0)
+        log_metrics_to_wandb(eval_metrics, type="eval", step=None)
         wandb.save(results_file)
 
 
@@ -632,6 +632,11 @@ def log_metrics_to_wandb(metrics: dict, step: int, type: str = "train"):
     """Logs the metrics to wandb"""
     filtered_metrics = [key for key in metrics.keys() if ("accuracy" in key) or ("loss" in key)]
 
-    wandb.log({
-        f"{type}_{metric}": metrics[metric] for metric in filtered_metrics
-    }, step=step)
+    if step:
+        wandb.log({
+            f"{type}_{metric}": metrics[metric] for metric in filtered_metrics
+        }, step=step)
+    else:
+        wandb.log({
+            f"{type}_{metric}": metrics[metric] for metric in filtered_metrics
+        })
