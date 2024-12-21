@@ -5,11 +5,12 @@ Usage: python visualize_results.py <csv_file> <output_file>
 
 import csv
 import json
-import sys
-import matplotlib.pyplot as plt
-import numpy as np
+import argparse
 import io
 import base64
+import os
+import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 
@@ -22,7 +23,9 @@ HTML_TEMPLATE = """
             font-family: Arial, sans-serif;
         }}
         .sample {{
-            margin-bottom: 30px;
+            padding-top: 0px;
+            padding-bottom: 10px;
+            border-top: 1px solid #ccc;
         }}
         .grid-container {{
             display: flex;
@@ -52,12 +55,6 @@ HTML_TEMPLATE = """
             font-size: 14px;
             border: 1px solid #eee;
         }}
-        .correct {{
-            background-color: #d4edda;
-        }}
-        .incorrect {{
-            background-color: #f8d7da;
-        }}
         .hidden {{
             display: none;
         }}
@@ -66,7 +63,7 @@ HTML_TEMPLATE = """
             margin-bottom: 20px;
         }}
         button {{
-            background-color: #4CAF50;
+            background-color: #010101;
             border: none;
             color: white;
             padding: 10px 20px;
@@ -116,10 +113,21 @@ HTML_TEMPLATE = """
                 }}
             }}
         }}
+        function sortSamplesBy(attribute) {{
+            var samples = Array.from(document.getElementsByClassName('sample'));
+            samples.sort(function(a, b) {{
+                return parseFloat(b.dataset[attribute]) - parseFloat(a.dataset[attribute]);
+            }});
+            var container = document.getElementById('samples-container');
+            container.innerHTML = '';
+            samples.forEach(function(sample) {{
+                container.appendChild(sample);
+            }});
+        }}
     </script>
 </head>
 <body>
-    <h1 style="text-align: center;">{model_name}</h1>
+    <h1 style="text-align: center;">{report_title}</h1>
     <div class="button-container">
         <button onclick="filterSamples('all')">Show All ({total_count})</button>
         <button onclick="filterSamples('correct')">Show Correct ({correct_count})</button>
@@ -131,14 +139,22 @@ HTML_TEMPLATE = """
         <input type="text" id="sampleIdInput" placeholder="Enter Sample ID">
         <button onclick="filterBySampleId()">Filter by Sample ID</button>
     </div>
-    {content}
+    <div class="button-container">
+        <button onclick="sortSamplesBy('loss')">Sort by Loss</button>
+        <button onclick="sortSamplesBy('accuracy')">Sort by Accuracy</button>
+        <button onclick="sortSamplesBy('foregroundAccuracy')">Sort by Foreground Accuracy</button>
+        <button onclick="sortSamplesBy('backgroundAccuracy')">Sort by Background Accuracy</button>
+    </div>
+    <div id="samples-container">
+        {content}
+    </div>
 </body>
 </html>
 """
 
 
-def generate_html(csv_file, output_file):
-    filename = csv_file.split('/')[-1].split('.', 1)[0]
+def generate_html(csv_file, output_file, report_title):
+    filename = os.path.splitext(os.path.basename(csv_file))[0]
     print(f"Processing {filename}")
 
     with open(csv_file, 'r') as file:
@@ -152,9 +168,26 @@ def generate_html(csv_file, output_file):
     samples_html = ""
     with tqdm(total=len(rows), desc="Processed grids", unit="grid") as pbar:
         for row in rows:
-            sample_html = f"<div class='sample { 'correct' if row['is_correct'].lower() == 'true' else 'incorrect' }' \
-                            data-sample-id='{row['sample_id']}'>"
-            sample_html += f"<h3 style='text-align: center;'>Sample ID: {row['sample_id']}</h3>"
+            sample_html = f"<div class='sample ' \
+                            data-sample-id='{row['sample_id']}' \
+                            data-loss='{row['loss']}' \
+                            data-accuracy='{row['accuracy']}' \
+                            data-foreground-accuracy='{row['foreground_accuracy']}' \
+                            data-background-accuracy='{row['background_accuracy']}'>"
+            sample_html += f"<h3 style='text-align: center; margin-top: 0px;'>Sample ID: {row['sample_id']}</h3>"
+            if 'loss' in row:
+                sample_html += (
+                    f"<h4 style='text-align: center; margin: 0 auto;'>"
+                    f"<span style='margin-right: 20px;'>Focal Loss: {float(row['loss']):.3f}</span>"
+                    f"<span>Accuracy (mIOU): {float(row['accuracy']):.3f}</span>"
+                    f"</h4>"
+                )
+                sample_html += (
+                    f"<h4 style='text-align: center; margin: 0 auto;'>"
+                    f"<span style='margin-right: 20px;'>Foreground Accuracy: {float(row['foreground_accuracy']) * 100:.2f}%</span>"
+                    f"<span>Background Accuracy: {float(row['background_accuracy']) * 100:.2f}%</span>"
+                    f"</h4>"
+                )
             sample_html += "<div class='grid-container'>"
             sample_html += render_grid_html(row['input'], "Input Grid", "unpadded")
             sample_html += render_grid_html(row['target'], "Target Grid", "unpadded")
@@ -167,7 +200,7 @@ def generate_html(csv_file, output_file):
             pbar.update(1)
 
     html_content = HTML_TEMPLATE.format(
-        model_name=filename,
+        report_title=report_title,
         total_count=total_count,
         correct_count=correct_count,
         incorrect_count=incorrect_count,
@@ -180,7 +213,7 @@ def generate_html(csv_file, output_file):
 
 
 def render_grid_html(grid, label, grid_type):
-    image_base64 = render_grid_image(grid, label)
+    image_base64 = render_grid_image(grid)
     return f"""
     <div class='grid-item {grid_type}'>
         <h4>{label}</h4>
@@ -189,7 +222,7 @@ def render_grid_html(grid, label, grid_type):
     """
 
 
-def render_grid_image(grid, label):
+def render_grid_image(grid):
     grid_data = json.loads(grid)
     rows = len(grid_data)
     cols = len(grid_data[0]) if rows > 0 else 0
@@ -216,9 +249,17 @@ def render_grid_image(grid, label):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python visualize_results.py <csv_file> <output_file>")
-    else:
-        csv_file = sys.argv[1]
-        output_file = sys.argv[2]
-        generate_html(csv_file, output_file)
+    parser = argparse.ArgumentParser(description="Generate HTML report from CSV file")
+    parser.add_argument("-i", "--input_file", type=str, required=True, help="Path to the input CSV file")
+    parser.add_argument("-o", "--output_dir", type=str, default=None, help="Directory to save the output HTML file")
+    parser.add_argument("-t", "--report_title", type=str, help="Title of the report")
+
+    args = parser.parse_args()
+
+    input_file = args.input_file
+    output_dir = args.output_dir if args.output_dir else os.path.dirname(input_file)
+    report_title = args.report_title if args.report_title else os.path.splitext(os.path.basename(input_file))[0]
+
+    output_file = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(input_file))[0]}.html")
+
+    generate_html(input_file, output_file, report_title)
