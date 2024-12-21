@@ -328,6 +328,7 @@ def eval_model_with_test_time_tuning(
         total_loss = 0
         losses = {}
 
+        test_input, test_output = test_input.to(device), test_output.to(device)
         with torch.no_grad():
             logits, outputs = fine_tuned_model(test_input, return_logits=True)
 
@@ -372,6 +373,7 @@ def eval_model_with_test_time_tuning(
         results["input"] += [unpadded_input.cpu().numpy().tolist()]
         results["target"] += [unpadded_target.cpu().numpy().tolist()]
         results["predicted"] += [unpadded_output.cpu().numpy().tolist()]
+        print("=" * 50, "\n")
 
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
@@ -379,6 +381,12 @@ def eval_model_with_test_time_tuning(
     test_df = pd.DataFrame(results)
     test_df['is_correct'] = test_df.apply(lambda row: row['predicted'] == row['target'], axis=1)
     test_df.to_csv(results_file, index=False)
+    print("Average evaluation Metrics:")
+    print("-" * 50)
+    print(f"Loss: {test_df['loss'].mean():.2f}")
+    print(f"Accuracy (mIOU): {test_df['accuracy'].mean():.2f}%")
+    print(f"Foreground Accuracy: {test_df['foreground_accuracy'].mean() * 100:.2f}%")
+    print(f"Background Accuracy: {test_df['background_accuracy'].mean() * 100:.2f}%")
     print(f"Test-time Tuning results saved to: {results_file}")
 
 
