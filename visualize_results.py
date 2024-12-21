@@ -11,6 +11,7 @@ import base64
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap, BoundaryNorm
 from tqdm import tqdm
 
 
@@ -228,14 +229,27 @@ def render_grid_image(grid):
     cols = len(grid_data[0]) if rows > 0 else 0
 
     # Convert grid data to a numpy array
-    grid_array = np.array(grid_data)
+    grid_array = np.array(grid_data, dtype=np.int8)
 
     pixel_size = 0.5  # Size of each pixel in the grid
     fig, ax = plt.subplots(figsize=(cols * pixel_size, rows * pixel_size))
-    plt.axis('off')
 
     # Display the grid
-    ax.matshow(grid_array)
+    cmap, norm = get_arc_cmap()
+    ax.matshow(grid_array, cmap=cmap, norm=norm)
+
+    # Add grid lines
+    ax.set_xticks(np.arange(-.5, cols, 1), minor=True)
+    ax.set_yticks(np.arange(-.5, rows, 1), minor=True)
+    ax.grid(which='minor', color='gray', linestyle='-', linewidth=1)
+
+    ax.tick_params(which='both', size=0)  # Hide minor tick marks
+    ax.tick_params(
+        left=False, bottom=False,
+        right=False, top=False,
+        labelleft=False, labelbottom=False,
+        labelright=False, labeltop=False
+    )  # Hide axis labels and ticks
 
     # Save the figure to a BytesIO object
     buf = io.BytesIO()
@@ -246,6 +260,30 @@ def render_grid_image(grid):
     # Encode the image as base64
     image_base64 = base64.b64encode(buf.read()).decode('utf-8')
     return f"data:image/png;base64,{image_base64}"
+
+
+def get_arc_cmap():
+    """Get the color map used in the official ARC-AGI visualizations
+
+    Returns:
+        tuple: ListedColormap, BoundaryNorm
+    """
+    # Source: https://github.com/fchollet/ARC-AGI/blob/aa922be204204ec148a1137fe6ed4d34ddde812b/apps/css/common.css
+    color_map = ListedColormap([
+        '#000000',  # Black
+        '#0074D9',  # Blue
+        '#FF4136',  # Red
+        '#2ECC40',  # Green
+        '#FFDC00',  # Yellow
+        '#AAAAAA',  # Gray
+        '#F012BE',  # Fuchsia
+        '#FF851B',  # Orange
+        '#7FDBFF',  # Teal
+        '#870C25',  # Brown
+    ])
+    norm = BoundaryNorm(np.arange(-0.5, 10.5, 1), color_map.N)
+
+    return color_map, norm
 
 
 if __name__ == "__main__":
