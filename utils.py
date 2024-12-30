@@ -678,13 +678,18 @@ def eval_model(
         "predicted": [],
         "padded_input": [],
         "padded_target": [],
-        "padded_predicted": []
+        "padded_predicted": [],
+        "loss": [],
+        "accuracy": [],
+        "foreground_accuracy": [],
+        "background_accuracy": []
     }
 
     model.eval()
     unpad_transform = UnpadTransform()
     with tqdm(total=len(dataloader), desc="Evaluation", unit="batch") as pbar:
         for metadata, inputs, targets in dataloader:
+            inputs, targets = inputs.to(device), targets.to(device)
             outputs, batch_metrics = process_one_batch(
                 model,
                 (inputs, targets),
@@ -734,6 +739,9 @@ def eval_model(
     print("-" * 50)
     for metric in filtered_metrics:
         print(f"{metric}: {eval_metrics[metric]:.2f}")
+
+    # remove empty lists from results
+    results = {key: value for key, value in results.items() if value}
 
     # Save results
     os.makedirs(results_dir, exist_ok=True)
