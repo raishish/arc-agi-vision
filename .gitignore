@@ -11,6 +11,7 @@ venv/
 venv3/
 .python-version
 .DS_Store
+.vscode
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -18,5 +19,6 @@ venv3/
 # W&B
 wandb/
 
-# Models
+# Models & Results
 models/*
+results/*
