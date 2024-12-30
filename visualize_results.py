@@ -115,10 +115,16 @@ HTML_TEMPLATE = """
                 }}
             }}
         }}
-        function sortSamplesBy(attribute) {{
+        function sortSamplesBy(attribute, order) {{
             var samples = Array.from(document.getElementsByClassName('sample'));
             samples.sort(function(a, b) {{
-                return parseFloat(b.dataset[attribute]) - parseFloat(a.dataset[attribute]);
+                var aValue = parseFloat(a.dataset[attribute]);
+                var bValue = parseFloat(b.dataset[attribute]);
+                if (order === 'asc') {{
+                    return aValue - bValue;
+                }} else {{
+                    return bValue - aValue;
+                }}
             }});
             var container = document.getElementById('samples-container');
             container.innerHTML = '';
@@ -130,28 +136,11 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <h1 style="text-align: center;">{report_title}</h1>
-    <h2 style="text-align: center;">
-     Loss: {loss}, Accuracy (mIOU): {acc}, Foreground Accuracy: {fg_acc}%, Background Accuracy: {bg_acc}%
-    </h2>
-    <div class="button-container">
-        <button onclick="filterSamples('all')">Show All ({total_count})</button>
-        <button onclick="filterSamples('correct')">Show Correct ({correct_count})</button>
-        <button onclick="filterSamples('incorrect')">Show Incorrect ({incorrect_count})</button>
-        <button onclick="toggleGrid('padded')">Show Padded</button>
-        <button onclick="toggleGrid('unpadded')">Show Unpadded</button>
-    </div>
-    <div class="button-container">
-        <input type="text" id="sampleIdInput" placeholder="Enter Sample ID">
-        <button onclick="filterBySampleId()">Filter by Sample ID</button>
-    </div>
-    <div class="button-container">
-        <button onclick="sortSamplesBy('loss')">Sort by Loss</button>
-        <button onclick="sortSamplesBy('accuracy')">Sort by Accuracy</button>
-        <button onclick="sortSamplesBy('foregroundAccuracy')">Sort by Foreground Accuracy</button>
-        <button onclick="sortSamplesBy('backgroundAccuracy')">Sort by Background Accuracy</button>
-    </div>
+    {metrics_html}
+    {buttons_html}
+    {metrics_sort_buttons_html}
     <div id="samples-container">
-        {content}
+        {samples_html}
     </div>
 </body>
 </html>
@@ -164,10 +153,9 @@ def generate_html(csv_file, output_file, report_title):
 
     # calculate metrics
     df = pd.read_csv(csv_file)
-    avg_loss = round(float(df['loss'].mean()), 2)
-    avg_accuracy = round(float(df['accuracy'].mean()), 2)
-    avg_foreground_accuracy = round(float(df['foreground_accuracy'].mean() * 100), 2)
-    avg_background_accuracy = round(float(df['background_accuracy'].mean() * 100), 2)
+    metrics = set(['loss', 'accuracy', 'foreground_accuracy', 'background_accuracy'])
+    metrics_exists = metrics.issubset(df.columns)
+
     total_count = len(df)
     correct_count = df['is_correct'].sum()
     incorrect_count = len(df) - correct_count
@@ -179,14 +167,19 @@ def generate_html(csv_file, output_file, report_title):
     samples_html = ""
     with tqdm(total=len(rows), desc="Processed grids", unit="grid") as pbar:
         for row in rows:
-            sample_html = f"<div class='sample ' \
-                            data-sample-id='{row['sample_id']}' \
-                            data-loss='{row['loss']}' \
-                            data-accuracy='{row['accuracy']}' \
-                            data-foreground-accuracy='{row['foreground_accuracy']}' \
-                            data-background-accuracy='{row['background_accuracy']}'>"
+            correctness_class = 'correct' if row.get('is_correct').lower() == 'true' else 'incorrect'
+            if not metrics_exists:
+                sample_html = f"<div class='sample {correctness_class}' \
+                                data-sample-id='{row['sample_id']}'>"
+            else:
+                sample_html = f"<div class='sample {correctness_class}' \
+                                data-sample-id='{row['sample_id']}' \
+                                data-loss='{row['loss']}' \
+                                data-accuracy='{row['accuracy']}' \
+                                data-foreground-accuracy='{row['foreground_accuracy']}' \
+                                data-background-accuracy='{row['background_accuracy']}'>"
             sample_html += f"<h3 style='text-align: center; margin-top: 0px;'>Sample ID: {row['sample_id']}</h3>"
-            if 'loss' in row:
+            if metrics_exists:
                 sample_html += (
                     f"<h4 style='text-align: center; margin: 0 auto;'>"
                     f"<span style='margin-right: 20px;'>Focal Loss: {float(row['loss']):.3f}</span>"
@@ -195,7 +188,8 @@ def generate_html(csv_file, output_file, report_title):
                 )
                 sample_html += (
                     f"<h4 style='text-align: center; margin: 0 auto;'>"
-                    f"<span style='margin-right: 20px;'>Foreground Accuracy: {float(row['foreground_accuracy']) * 100:.2f}%</span>"
+                    f"<span style='margin-right: 20px;'> \
+                    Foreground Accuracy: {float(row['foreground_accuracy']) * 100:.2f}%</span>"
                     f"<span>Background Accuracy: {float(row['background_accuracy']) * 100:.2f}%</span>"
                     f"</h4>"
                 )
@@ -210,16 +204,50 @@ def generate_html(csv_file, output_file, report_title):
             samples_html += sample_html
             pbar.update(1)
 
+    buttons_html = f"""
+        <div class="button-container">
+            <button onclick="filterSamples('all')">Show All ({total_count})</button>
+            <button onclick="filterSamples('correct')">Show Correct ({correct_count})</button>
+            <button onclick="filterSamples('incorrect')">Show Incorrect ({incorrect_count})</button>
+            <button onclick="toggleGrid('padded')">Show Padded</button>
+            <button onclick="toggleGrid('unpadded')">Show Unpadded</button>
+        </div>
+        <div class="button-container">
+            <input type="text" id="sampleIdInput" placeholder="Enter Sample ID">
+            <button onclick="filterBySampleId()">Filter by Sample ID</button>
+        </div>
+    """
+
+    if metrics_exists:
+        loss = round(df['loss'].mean(), 2)
+        acc = round(df['accuracy'].mean(), 2)
+        fg_acc = round(df['foreground_accuracy'].mean() * 100, 2)
+        bg_acc = round(df['background_accuracy'].mean() * 100, 2)
+
+        metrics_html = f"""
+        <h2 style="text-align: center;">
+        Loss: {loss}, Accuracy (mIOU): {acc}, Foreground Accuracy: {fg_acc}%, Background Accuracy: {bg_acc}%
+        </h2>
+        """
+
+        metrics_sort_buttons_html = f"""
+            <div class="button-container">
+                <button onclick="sortSamplesBy('loss', 'asc')">Sort by Loss</button>
+                <button onclick="sortSamplesBy('accuracy', 'desc')">Sort by Accuracy</button>
+                <button onclick="sortSamplesBy('foregroundAccuracy', 'desc')">Sort by Foreground Accuracy</button>
+                <button onclick="sortSamplesBy('backgroundAccuracy', 'desc')">Sort by Background Accuracy</button>
+            </div>
+        """
+    else:
+        metrics_html = ""
+        metrics_sort_buttons_html = ""
+
     html_content = HTML_TEMPLATE.format(
         report_title=report_title,
-        total_count=total_count,
-        correct_count=correct_count,
-        incorrect_count=incorrect_count,
-        loss=avg_loss,
-        acc=avg_accuracy,
-        fg_acc=avg_foreground_accuracy,
-        bg_acc=avg_background_accuracy,
-        content=samples_html
+        metrics_html=metrics_html,
+        buttons_html=buttons_html,
+        metrics_sort_buttons_html=metrics_sort_buttons_html,
+        samples_html=samples_html
     )
 
     with open(output_file, 'w') as file:
